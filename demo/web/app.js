@@ -12,12 +12,50 @@ function notify(msg) {
 }
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, opts);
+  const r = await fetch(path, { credentials: 'same-origin', ...opts });
   let data = null;
   try { data = await r.json(); } catch { /* ignore */ }
+  if (r.status === 401 && path !== '/api/session') showLogin((data && data.detail) || '請先登入');
   if (!r.ok) throw new Error((data && data.detail) || `伺服器錯誤（${r.status}）`);
   return data;
 }
+
+/* ---------------- login (S01) ---------------- */
+let me = null;
+function showLogin(msg) {
+  me = null;
+  document.body.classList.add('logged-out');
+  $('login').hidden = false;
+  $('login-error').hidden = !msg; $('login-error').textContent = msg || '';
+  $('login-error').classList.toggle('info', msg === '已登出。');
+  $('login-code').value = '';
+  setTimeout(() => $('login-account').focus(), 0);
+}
+function applySession(data) {
+  me = data;
+  document.body.classList.remove('logged-out');
+  $('login').hidden = true;
+  const c = (data.cases || [])[0];
+  $('who').textContent = data.account.display_name + (c ? `・案件 ${c.display_code}` : '');
+  applyRole(data.account.role);
+  refreshCount();
+}
+$('login-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('login-submit'); btn.disabled = true;
+  try {
+    const data = await api('/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account: $('login-account').value, code: $('login-code').value }) });
+    applySession(data);
+  } catch (err) {
+    $('login-error').hidden = false; $('login-error').classList.remove('info'); $('login-error').textContent = err.message;
+    $('login-code').focus();
+  } finally { btn.disabled = false; }
+});
+$('logout').addEventListener('click', async () => {
+  try { await api('/api/session', { method: 'DELETE' }); } catch { /* ignore */ }
+  showLogin('已登出。');
+});
 
 /* ---------------- navigation ---------------- */
 function showView(name) {
@@ -33,15 +71,15 @@ function showView(name) {
   if (name === 'tasks') loadTodos();
   if (name === 'line') loadLine();
 }
-all('[data-role]').forEach(btn => btn.addEventListener('click', () => {
-  role = btn.dataset.role;
+function applyRole(r) {
+  role = r;
   document.body.classList.toggle('officer', role === 'officer');
   all('[data-role]').forEach(b => { const on = b.dataset.role === role; b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on)); });
   all('[data-access]').forEach(el => { el.hidden = el.dataset.access !== 'both' && el.dataset.access !== role; });
   const label = role === 'employer' ? '雇主專區' : '市府承辦人專區';
   $('role-label').textContent = label; $('chat-role').textContent = label;
   showView(role === 'employer' ? 'upload' : 'review');
-}));
+}
 all('[data-view]').forEach(b => b.addEventListener('click', () => showView(b.dataset.view)));
 all('[data-goto]').forEach(b => b.addEventListener('click', () => showView(b.dataset.goto)));
 document.querySelector('.brand').addEventListener('click', e => { e.preventDefault(); showView(role === 'employer' ? 'upload' : 'review'); });
@@ -57,7 +95,7 @@ document.querySelector('.brand').addEventListener('click', e => { e.preventDefau
   } catch {
     b.classList.add('health-bad'); b.innerHTML = '<span></span>後端未連線';
   }
-  refreshCount();
+  try { applySession(await api('/api/session')); } catch { showLogin(''); }
 })();
 
 /* ---------------- upload & extract ---------------- */

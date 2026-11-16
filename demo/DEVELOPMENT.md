@@ -43,6 +43,10 @@ py -3.12 -m venv .venv
 |---|---|---|
 | `DEMO_DATA` | 否（預設 `true`） | 合成資料示範模式的唯一標記。設成 `true` 以外的值，伺服器會**拒絕啟動**，因為這個版本沒有經過處理真實資料所需的審查。 |
 | `LINE_CHANNEL_SECRET`、`LINE_CHANNEL_ACCESS_TOKEN` | 否 | LINE Messaging API。也可以寫在 `demo/server/line.env`（見 `line.env.example`）。環境變數優先。**不可提交。** |
+| `DEMO_LOGIN_CODES` | 否 | 團隊共用、可重複使用的登入碼，格式為 `employer_a:碼,employer_b:碼,officer:碼`。**沒有設定時**，伺服器每次啟動都會隨機產生一組，並**只印在伺服器自己的主控台**。不要寫進任何會提交的檔案。 |
+| `ZP_DB_PATH` | 否 | SQLite 檔案位置，預設為 `demo/server/data/zhupinan.db`（已列入 `.gitignore`）。 |
+| `ZP_UPLOAD_DIR` | 否 | 上傳暫存資料夾，預設為 `demo/server/uploads`。測試時會改指向暫存目錄。 |
+| `COOKIE_SECURE` | 否 | 設為 `true` 時，Cookie 一律加上 `Secure`。使用 HTTPS 時（包括反向代理送出 `X-Forwarded-Proto: https`）也會自動加上。 |
 | `DOCS_DIR`、`QSET` | 否 | 只給驗證腳本使用，見第 5 節。 |
 
 ## 4. 啟動
@@ -61,15 +65,34 @@ curl.exe -s http://127.0.0.1:8765/api/health
 
 應該會看到 `"demo_mode":true`、`"calendar_years":["2026","2027"]`、`"articles":359`，以及六部法規的修正日期。回應中不含任何金鑰。
 
+### 登入（S01）
+
+打開網頁會先看到登入畫面。選擇示範帳號後輸入登入碼：
+
+- 團隊開發時：先設定 `DEMO_LOGIN_CODES` 再啟動，或直接看伺服器主控台印出的隨機登入碼。
+- 給評審或試用者：產生**一次性**登入碼（用過一次就失效，預設 12 小時內有效）：
+
+```powershell
+.venv\Scripts\python demo\server\auth.py issue employer_a 12
+```
+
+| 帳號 | 角色 | 可以做的事 |
+|---|---|---|
+| `employer_a` | 雇主（家庭看護），案件 `DEMO-A01` | 上傳公文、管理待辦、上傳證明、法規問答、LINE 預覽 |
+| `employer_b` | 雇主（產業），案件 `DEMO-B01` | 和 A 一樣，但只看得到自己的案件 |
+| `officer` | 承辦人，兼示範管理 | 處分書檢核、法規問答、重置展示資料；**看不到任何雇主案件** |
+
 ## 5. 測試
 
-### 5.1 S00 單元測試（不需模型）
+### 5.1 單元測試：S00 健康檢查、S01 登入與資料隔離（不需模型）
 
 ```powershell
 .venv\Scripts\python -m unittest discover -s demo\tests -v
 ```
 
-會檢查 `/api/health` 的欄位、確認回應不含 LINE 金鑰、確認 `DEMO_DATA=false` 時拒絕啟動。
+S00 的 3 項：`/api/health` 欄位正確、回應不含 LINE 金鑰、`DEMO_DATA=false` 時拒絕啟動。
+
+S01 的 25 項（`test_s01_auth.py`）：登入成功與失敗、第 6 次嘗試被擋（429）、Cookie 旗標正確且資料庫只存雜湊、登出與過期後失效、匿名呼叫 11 個受保護端點都回 401、A 和 B 雇主互相讀寫都被擋下（404）、雇主不能用承辦人功能且承辦人讀不到雇主案件（403）、跨站寫入被拒、重複匯入不會重複產生待辦、重置後資料清空，以及 LINE 方面：未綁定的帳號收不到任何待辦、已綁定的帳號只收到自己的、簽章錯誤會被拒、沒有綁定時不會發送。
 
 ### 5.2 既有驗證基準：離線重新評分（不需模型）
 
@@ -107,30 +130,42 @@ git status --short validation
 
 | 路徑 | 內容 | 版控 |
 |---|---|---|
-| `demo/server/data/state.json` | 目前**所有案件共用**的待辦狀態 | 不提交 |
-| `demo/server/data/line_users.json` | LINE 好友清單（全域） | 不提交 |
-| `demo/server/uploads/` | 上傳的原件與證明 | 不提交 |
-| `demo/server/cache/`、`tmp/` | 模型回應快取、暫存 | 不提交 |
+| `demo/server/data/zhupinan.db` | SQLite：帳號、Session（只存雜湊）、案件、文件欄位、待辦、證明判讀、LINE 綁定、通知紀錄、稽核紀錄 | 不提交 |
+| `demo/server/uploads/` | 證明的上傳檔（S02 會改成用完即刪） | 不提交 |
+| `demo/server/cache/`、`tmp/` | 模型回應快取、暫存檔 | 不提交 |
+| `demo/server/schema.sql` | 資料表定義，伺服器啟動時自動建立 | 提交 |
 
-S01 之前的重置方式（先停止伺服器）：
+**重置展示資料**：用 `officer` 登入後呼叫 `POST /api/demo/reset`。它會在一次交易中清除所有案件資料、LINE 綁定與通知紀錄，重建兩個空白的示範案件，再清空上傳與暫存資料夾。帳號與登入碼會保留。如果要完全從頭開始，先停止伺服器，再刪除資料庫：
 
 ```powershell
-Remove-Item -Recurse -Force demo\server\data, demo\server\uploads, demo\server\tmp -ErrorAction SilentlyContinue
+Remove-Item demo\server\data\zhupinan.db
 ```
 
-網頁上的「清空待辦」（`DELETE /api/todos`）只會重設 `state.json`，**不會刪除上傳的原件**，這是已知缺口（S02）。`cache/` 裡存的是預存的模型回應，網路斷線時展示會用到，平常不要刪。
+雇主在網頁上按「清除展示資料」（`DELETE /api/todos`）時，只會清除**自己**案件的資料和證明檔。
 
-S10 會提供 `demo/seed.py`、`demo/reset.py`，用來取代上述手動步驟。
+**舊資料遷移**：S01 起不再讀取 `demo/server/data/state.json`。要把裡面的資料搬進 SQLite：
 
-## 7. 目前已知限制（S00 基線，未修正）
+```powershell
+.venv\Scripts\python demo\server\migrate_state.py --account employer_a           # 試跑，不寫入
+.venv\Scripts\python demo\server\migrate_state.py --account employer_a --apply   # 先備份到 data\backup-*\，再寫入
+```
 
-以下限制原樣保留在基線中，依工作包排程修正：
+重複執行不會產生重複的待辦。證明的判讀結果不會遷移。
 
-- 沒有登入、Session 或案件隔離；匿名呼叫 `GET /api/todos` 會回 200 和全部待辦 → **S01**
-- 上傳原件會寫入磁碟，清空時不會刪除；掃描圖片會直接送外部模型 → **S02**
-- 證明判讀為「準時」時會自動視為完成 → **S03**
-- LINE 推播會發給所有好友；沒有配對碼，也沒有排程 → **S05**
-- 失聯流程是用日期推算，沒有判斷「實際應工作日」 → **S06**
-- 沒有 Manifest／Service Worker → **S09**
+S10 會提供 `demo/seed.py` 與 `demo/reset.py`，用來重建固定的合成文件與待辦。
 
-**在 S01、S02 完成前，不可讓評審或真實雇主掃碼上傳資料。**
+## 7. 目前已知限制
+
+S01 已修正以下問題：匿名就能讀取全部待辦、所有人共用 `state.json`、LINE 推播會發給所有好友。
+
+仍待修正：
+
+- 上傳的原件會寫入磁碟；掃描圖片會直接送到外部模型 → **S02**
+- 證明判讀為「準時」時，畫面仍會顯示為已完成；期限沒有 `calc_trace`；超出辦公日曆範圍的日期沒有改成「需人工確認」 → **S03**
+- 既有介面的全域樣式把輸入框字級設成 11px（規格要求至少 16px，否則 iOS 會自動放大畫面）。登入頁已修正，其他畫面待修 → **S04**
+- LINE 配對碼、提醒排程、訊息去識別化（目前訊息仍含移工姓名） → **S05**
+- 失聯流程是用日期直接推算，沒有判斷「實際應工作日」 → **S06**
+- 沒有 Manifest 與 Service Worker；靜態檔目前以 `Cache-Control: no-cache` 每次重新驗證 → **S09**
+- 登入失敗次數的限制記在記憶體中，伺服器重啟後會歸零（單機示範可接受）
+
+**S02 完成前，不可讓評審或真實雇主上傳真實文件。**

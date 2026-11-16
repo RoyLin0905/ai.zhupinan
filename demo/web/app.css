@@ -71,3 +71,20 @@ body.officer .spinner { border-top-color: #C0754A; }
 @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(42, 138, 122, .55); } 50% { box-shadow: 0 0 0 10px rgba(42, 138, 122, 0); } }
 .health-ok span { background: #2F855A !important; }
 .health-bad span { background: #C2412D !important; }
+
+/* ---------------- S01 login & session ---------------- */
+.session-box { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 12px; }
+.session-box .who { font-size: 14px; color: var(--text); max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-box button { min-height: 36px; }
+body.logged-out .app-shell, body.logged-out .session-box { visibility: hidden; }
+.login-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: var(--bg); }
+.login-backdrop[hidden] { display: none; }
+.login-card { width: min(420px, 100%); display: grid; gap: 10px; padding: 28px; background: var(--card); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); }
+.login-card h1 { margin: 0; font-size: 24px; }
+.login-card p { margin: 0; }
+.login-card label { font-weight: 600; font-size: 15px; margin-top: 6px; }
+#login-form select, #login-form input { min-height: 44px; font-size: 16px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text); }
+#login-form select:focus-visible, #login-form input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.login-card .btn { min-height: 44px; margin-top: 8px; }
+.login-error { color: var(--red); font-size: 15px; }
+.login-error.info { color: var(--muted); }

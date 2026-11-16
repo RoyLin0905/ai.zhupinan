@@ -15,8 +15,11 @@ import uuid
 from datetime import date, datetime
 from pathlib import Path
 
+import shutil
+import sqlite3
+
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -25,6 +28,8 @@ HERE = Path(__file__).resolve().parent
 VALID = HERE.parent.parent / "validation" / "scripts"
 sys.path.insert(0, str(VALID))
 
+import auth  # noqa: E402
+import db  # noqa: E402
 import llm  # noqa: E402
 import penalty as pen_mod  # noqa: E402
 import qa as qa_mod  # noqa: E402
@@ -45,10 +50,109 @@ if DEMO_DATA != "true":
 WEB = HERE.parent / "web"
 DATA = HERE / "data"
 DATA.mkdir(exist_ok=True)
-UPLOADS = HERE / "uploads"
-UPLOADS.mkdir(exist_ok=True)
+UPLOADS = Path(os.environ.get("ZP_UPLOAD_DIR") or HERE / "uploads")
+UPLOADS.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="竹聘安 AI demo")
+
+# ---------------------------------------------------------------- database, sessions (S01)
+db.init_db()
+_boot = db.connect()
+_boot.isolation_level = None
+_generated_codes = auth.load_env_codes(_boot)
+_boot.close()
+if _generated_codes:  # printed to the server's own console only; never returned by any API
+    print("[竹聘安] 未設定 DEMO_LOGIN_CODES，本次啟動的示範登入碼：", file=sys.stderr)
+    for _acct, _code in _generated_codes.items():
+        print(f"  {_acct}: {_code}", file=sys.stderr)
+
+DB = Depends(db.get_db)
+EMPLOYER = Depends(auth.require_employer)
+OFFICER = Depends(auth.require_officer)
+ANYONE = Depends(auth.current_account)
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    """Reject cross-site writes before any handler runs; never let case or Q&A responses be cached."""
+    if request.url.path.startswith("/api/") and auth.cross_site(request):
+        return JSONResponse({"detail": "拒絕跨站請求"}, status_code=403)
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    elif "cache-control" not in response.headers:
+        # static UI: always revalidate so a demo machine never runs yesterday's JS/CSS (S09 adds versioned caching)
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+class Login(BaseModel):
+    account: str
+    code: str
+
+
+def _cases(con: sqlite3.Connection, owner_id: int) -> list[dict]:
+    return [dict(r) for r in con.execute(
+        "SELECT id, display_code, label, created_at, updated_at FROM cases WHERE owner_id=? ORDER BY id", (owner_id,))]
+
+
+def _me(con: sqlite3.Connection, acct: sqlite3.Row) -> dict:
+    return {"account": {"login_name": acct["login_name"], "role": acct["role"], "display_name": acct["display_name"],
+                        "is_demo_admin": bool(acct["is_demo_admin"])},
+            "cases": _cases(con, acct["id"]) if acct["role"] == "employer" else []}
+
+
+@app.post("/api/session")
+def session_login(body: Login, request: Request, response: Response, con: sqlite3.Connection = DB):
+    acct = auth.login(con, request, response, body.account.strip(), body.code.strip())
+    return _me(con, acct)
+
+
+@app.get("/api/session")
+def session_me(acct=ANYONE, con: sqlite3.Connection = DB):
+    return _me(con, acct)
+
+
+@app.delete("/api/session")
+def session_logout(request: Request, response: Response, con: sqlite3.Connection = DB):
+    auth.logout(con, request, response)
+    return {"ok": True}
+
+
+@app.get("/api/cases")
+def list_cases(acct=EMPLOYER, con: sqlite3.Connection = DB):
+    return {"cases": _cases(con, acct["id"])}
+
+
+def owned_case(con: sqlite3.Connection, acct: sqlite3.Row, case_id: int | None) -> sqlite3.Row:
+    """The caller's case, or 404 (never 403) so other owners' case IDs are not revealed."""
+    if case_id is None:
+        row = con.execute("SELECT * FROM cases WHERE owner_id=? ORDER BY id LIMIT 1", (acct["id"],)).fetchone()
+    else:
+        row = con.execute("SELECT * FROM cases WHERE id=? AND owner_id=?", (case_id, acct["id"])).fetchone()
+    if row is None:
+        raise HTTPException(404, "找不到這個案件")
+    return row
+
+
+@app.get("/api/cases/{case_id}")
+def get_case(case_id: int, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    case = owned_case(con, acct, case_id)
+    items = _task_items(con, acct["id"], case_id)
+    return {"case": {k: case[k] for k in ("id", "display_code", "label", "created_at", "updated_at")},
+            "tasks": items}
+
+
+@app.post("/api/demo/reset")
+def demo_reset(acct=Depends(auth.require_demo_admin), con: sqlite3.Connection = DB):
+    db.reset_demo(con)
+    for folder in (UPLOADS, llm.TMP):
+        if folder.exists():
+            shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(exist_ok=True)
+    with db.tx(con):
+        db.audit(con, acct["id"], None, "demo", None, "reset")
+    return {"ok": True}
 
 # ---------------------------------------------------------------- extraction
 DEMO_EXTRACT_SYS = EXTRACT_SYS + """
@@ -100,7 +204,7 @@ def read_with_llm(system: str, image: Path | None, text_doc: str | None, intro: 
 
 
 @app.post("/api/extract")
-async def extract(file: UploadFile = File(...)):
+async def extract(file: UploadFile = File(...), acct=EMPLOYER):
     raw = await file.read()
     path, image, text_doc = ingest(raw, file.filename, UPLOADS)
     fid = path.stem
@@ -124,6 +228,8 @@ class Confirmed(BaseModel):
     doc_type: str
     workers: list[dict]
     save: bool = True
+    case_id: int | None = None          # default: the caller's first case
+    source_filename: str | None = None
 
 
 # 辦理窗口（許願卡 1：「知道要做什麼、去哪裡辦」）。
@@ -158,7 +264,9 @@ def with_office(o: dict) -> dict:
 
 
 @app.post("/api/obligations")
-def obligations(body: Confirmed):
+def obligations(body: Confirmed, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    """Compute deadlines with the deterministic rules; with save=true, store them in the caller's own case."""
+    case = owned_case(con, acct, body.case_id) if body.save else None
     items = []
     for w in body.workers:
         for o in compute(body.doc_type, w):
@@ -168,76 +276,83 @@ def obligations(body: Confirmed):
     items.sort(key=lambda x: x["start"] or x["due"])
     added = len(items)
     if body.save:
-        state = load_state()
-        seen = {_okey(o) for d in state["docs"] for o in d["obligations"]}
-        new = [o for o in items if _okey(o) not in seen]
-        added = len(new)
-        if new:
-            state["docs"].append({"doc_type": body.doc_type, "workers": body.workers, "obligations": new})
-            save_state(state)
-    return {"obligations": items, "added": added, "calendar_years": sorted(CAL_YEARS)}
+        added = 0
+        fields = json.dumps({"doc_type": body.doc_type, "workers": body.workers}, ensure_ascii=False, sort_keys=True)
+        with db.tx(con):
+            doc_id = con.execute(
+                "INSERT INTO documents(case_id, kind, source_filename, confirmed_fields_json, confirmed_at, source_digest) "
+                "VALUES (?,?,?,?,?,?)",
+                (case["id"], body.doc_type, body.source_filename, fields, db.now(),
+                 hashlib.sha256(fields.encode("utf-8")).hexdigest())).lastrowid
+            for o in items:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO tasks(case_id, document_id, rule_key, worker, worker_norm, title, start_date, "
+                    "due_date, law_ref, note, office, official_url, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (case["id"], doc_id, o["key"], o["worker"], _norm_worker(o["worker"]), o["title"], o.get("start"),
+                     o["due"], o.get("basis"), o.get("note"), o.get("office"),
+                     (o.get("online") or {}).get("url"), db.now()))
+                added += cur.rowcount
+            con.execute("UPDATE cases SET updated_at=? WHERE id=?", (db.now(), case["id"]))
+            db.audit(con, acct["id"], case["id"], "document", doc_id, f"confirm:{added}_tasks")
+    return {"obligations": items, "added": added, "calendar_years": sorted(CAL_YEARS),
+            "case_id": case["id"] if case else None}
 
 
-def _okey(o):
+def _norm_worker(name: str) -> str:
     """Same worker + same task + same deadline = same to-do (prevents duplicates)."""
-    return (o["worker"].strip().upper(), o["key"], o.get("start"), o["due"])
+    return (name or "").strip().upper()
 
 
-def load_state():
-    f = DATA / "state.json"
-    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {"docs": []}
-
-
-def save_state(s):
-    (DATA / "state.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+def _task_items(con: sqlite3.Connection, owner_id: int, case_id: int | None = None) -> list[dict]:
+    """All tasks of the owner's cases, shaped like the pre-S01 /api/todos items. Owner filter is in SQL."""
+    sql = ("SELECT t.*, c.display_code FROM tasks t JOIN cases c ON c.id = t.case_id WHERE c.owner_id = ?"
+           + (" AND c.id = ?" if case_id is not None else "") + " ORDER BY t.due_date, t.id")
+    rows = con.execute(sql, (owner_id, case_id) if case_id is not None else (owner_id,)).fetchall()
+    items = []
+    for t in rows:
+        p = con.execute("SELECT * FROM proofs WHERE task_id=? ORDER BY id DESC LIMIT 1", (t["id"],)).fetchone()
+        proof = json.loads(p["detail_json"]) if p and p["detail_json"] else None
+        o = {"id": str(t["id"]), "case_id": t["case_id"], "case_code": t["display_code"], "key": t["rule_key"],
+             "worker": t["worker"], "title": t["title"], "start": t["start_date"], "due": t["due_date"],
+             "basis": t["law_ref"], "note": t["note"], "status": t["status"], "assigned": t["assigned"],
+             "proof": proof, "days_left": (date.fromisoformat(t["due_date"]) - date.today()).days}
+        # baseline behaviour kept until S03: an on-time/late proof counts as done (S03 adds manual confirmation)
+        o["done"] = bool(proof and proof.get("verdict") in ("on_time", "late"))
+        items.append(with_office(o))
+    return items
 
 
 @app.get("/api/todos")
-def todos():
-    state = load_state()
-    items, seen = [], set()
-    for d in state["docs"]:
-        for o in d["obligations"]:
-            if _okey(o) not in seen:  # also cleans duplicates saved before this fix
-                seen.add(_okey(o))
-                items.append(o)
-    status = state.get("status", {})
-    for o in items:
-        o["days_left"] = (date.fromisoformat(o["due"]) - date.today()).days
-        o["id"] = todo_id(o)
-        st = status.get(o["id"], {})
-        o["assigned"] = st.get("assigned")
-        o["proof"] = st.get("proof")
-        o["done"] = bool(o["proof"] and o["proof"].get("verdict") in ("on_time", "late"))
-        with_office(o)
-    items.sort(key=lambda x: x["due"])
-    workers = sorted({o["worker"] for o in items})
-    return {"workers": workers, "items": items}
+def todos(acct=EMPLOYER, con: sqlite3.Connection = DB):
+    items = _task_items(con, acct["id"])
+    return {"workers": sorted({o["worker"] for o in items}), "items": items}
 
 
 @app.delete("/api/todos")
-def clear_todos():
-    save_state({"docs": [], "status": {}})
+def clear_todos(acct=EMPLOYER, con: sqlite3.Connection = DB):
+    """Clear only the caller's own cases (documents, tasks, proofs) and their proof files."""
+    files = [r["stored_file"] for r in con.execute(
+        "SELECT p.stored_file FROM proofs p JOIN tasks t ON t.id = p.task_id JOIN cases c ON c.id = t.case_id "
+        "WHERE c.owner_id = ? AND p.stored_file IS NOT NULL", (acct["id"],))]
+    with db.tx(con):
+        con.execute("DELETE FROM tasks WHERE case_id IN (SELECT id FROM cases WHERE owner_id=?)", (acct["id"],))
+        con.execute("DELETE FROM documents WHERE case_id IN (SELECT id FROM cases WHERE owner_id=?)", (acct["id"],))
+        db.audit(con, acct["id"], None, "case", None, "clear")
+    for f in files:
+        (UPLOADS / "proofs" / f).unlink(missing_ok=True)
     return {"ok": True}
 
 
 # ---------------------------------------------------------------- proof of completion
-def todo_id(o) -> str:
-    return hashlib.sha1("|".join(str(x) for x in _okey(o)).encode("utf-8")).hexdigest()[:12]
-
-
-def _find_todo(tid: str):
-    for o in todos()["items"]:
-        if o["id"] == tid:
-            return o
-    raise HTTPException(404, "找不到這項待辦")
-
-
-def _set_status(tid: str, **kv):
-    state = load_state()
-    st = state.setdefault("status", {}).setdefault(tid, {})
-    st.update(kv)
-    save_state(state)
+def _find_todo(con: sqlite3.Connection, acct: sqlite3.Row, tid: str) -> dict:
+    """The caller's own task, or 404."""
+    if not tid.isdigit():
+        raise HTTPException(404, "找不到這項待辦")
+    row = con.execute("SELECT t.case_id FROM tasks t JOIN cases c ON c.id = t.case_id WHERE t.id=? AND c.owner_id=?",
+                      (int(tid), acct["id"])).fetchone()
+    if row is None:
+        raise HTTPException(404, "找不到這項待辦")
+    return next(o for o in _task_items(con, acct["id"], row["case_id"]) if o["id"] == tid)
 
 
 class Assign(BaseModel):
@@ -245,10 +360,14 @@ class Assign(BaseModel):
 
 
 @app.post("/api/todos/{tid}/assign")
-def assign(tid: str, body: Assign):
-    _find_todo(tid)
-    _set_status(tid, assigned=body.assignee or None)
-    return {"ok": True, "assigned": body.assignee or None}
+def assign(tid: str, body: Assign, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    task = _find_todo(con, acct, tid)
+    who = body.assignee or None
+    with db.tx(con):
+        con.execute("UPDATE tasks SET assigned=?, status=CASE WHEN status IN ('todo','delegated') THEN ? ELSE status END "
+                    "WHERE id=?", (who, "delegated" if who else "todo", int(tid)))
+        db.audit(con, acct["id"], task["case_id"], "task", tid, "assign" if who else "unassign")
+    return {"ok": True, "assigned": who}
 
 
 PROOF_SYS = """你是「竹聘安 AI」的辦理證明核對模組。雇主或仲介上傳一份文件，用來證明某項移工法定待辦已經辦理。
@@ -303,8 +422,9 @@ def judge_proof(task: dict, data: dict) -> dict:
 
 
 @app.post("/api/todos/{tid}/proof")
-async def upload_proof(tid: str, file: UploadFile = File(...), by: str = Form("雇主")):
-    task = _find_todo(tid)
+async def upload_proof(tid: str, file: UploadFile = File(...), by: str = Form("雇主"), acct=EMPLOYER,
+                       con: sqlite3.Connection = DB):
+    task = _find_todo(con, acct, tid)
     raw = await file.read()
     path, image, text_doc = ingest(raw, file.filename, UPLOADS / "proofs", prefix=f"{tid}_")
     sys_prompt = PROOF_SYS + f"\n\n待辦事項：{task['title']}\n移工：{task['worker']}\n法定期限：" + \
@@ -313,20 +433,39 @@ async def upload_proof(tid: str, file: UploadFile = File(...), by: str = Form("�
     result = judge_proof(task, data)
     result.update({"file": path.name, "filename": file.filename, "uploaded_by": by,
                    "uploaded_at": datetime.now().isoformat(timespec="minutes"), "model": model})
-    _set_status(tid, proof=result)
+    with db.tx(con):
+        old = [r["stored_file"] for r in con.execute("SELECT stored_file FROM proofs WHERE task_id=?", (int(tid),))]
+        con.execute("DELETE FROM proofs WHERE task_id=?", (int(tid),))
+        con.execute("INSERT INTO proofs(task_id, submitted_at, observed_date, verdict, detail_json, stored_file) "
+                    "VALUES (?,?,?,?,?,?)", (int(tid), db.now(), result.get("completed_date"), result["verdict"],
+                                             json.dumps(result, ensure_ascii=False), path.name))
+        con.execute("UPDATE tasks SET status='proof_submitted' WHERE id=? AND status IN ('todo','delegated')", (int(tid),))
+        db.audit(con, acct["id"], task["case_id"], "proof", tid, f"submit:{result['verdict']}")
+    for f in old:
+        if f and f != path.name:
+            (UPLOADS / "proofs" / f).unlink(missing_ok=True)
     return result
 
 
 @app.delete("/api/todos/{tid}/proof")
-def delete_proof(tid: str):
-    _set_status(tid, proof=None)
+def delete_proof(tid: str, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    task = _find_todo(con, acct, tid)
+    files = [r["stored_file"] for r in con.execute("SELECT stored_file FROM proofs WHERE task_id=?", (int(tid),))]
+    with db.tx(con):
+        con.execute("DELETE FROM proofs WHERE task_id=?", (int(tid),))
+        con.execute("UPDATE tasks SET status=CASE WHEN assigned IS NULL THEN 'todo' ELSE 'delegated' END "
+                    "WHERE id=? AND status='proof_submitted'", (int(tid),))
+        db.audit(con, acct["id"], task["case_id"], "proof", tid, "delete")
+    for f in files:
+        if f:
+            (UPLOADS / "proofs" / f).unlink(missing_ok=True)
     return {"ok": True}
 
 
 @app.get("/api/todos/{tid}/proof/file")
-def proof_file(tid: str):
-    st = load_state().get("status", {}).get(tid, {})
-    proof = st.get("proof") or {}
+def proof_file(tid: str, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    task = _find_todo(con, acct, tid)
+    proof = task.get("proof") or {}
     f = UPLOADS / "proofs" / (proof.get("file") or "")
     if not proof.get("file") or not f.exists():
         raise HTTPException(404, "沒有證明檔案")
@@ -343,7 +482,7 @@ class Ask(BaseModel):
 
 
 @app.post("/api/ask")
-def ask(body: Ask):
+def ask(body: Ask, acct=ANYONE):
     q = body.question.strip()
     if not q:
         raise HTTPException(400, "請輸入問題")
@@ -370,7 +509,7 @@ class Draft(BaseModel):
 
 
 @app.post("/api/check-penalty")
-def check_penalty(body: Draft):
+def check_penalty(body: Draft, acct=OFFICER):
     if len(body.text.strip()) < 30:
         raise HTTPException(400, "請貼上完整的裁處書草稿")
     try:
@@ -384,7 +523,7 @@ def check_penalty(body: Draft):
 
 
 @app.post("/api/mask-preview")
-def mask_preview(body: Draft):
+def mask_preview(body: Draft, acct=ANYONE):
     """Show exactly what would be sent to the AI (for the demo and for auditing)."""
     masked, mapping = mask(body.text)
     return {"masked": masked, "pseudonyms": len(mapping)}
@@ -414,9 +553,11 @@ def line_api(path: str, payload: dict) -> tuple[int, str]:
     return r.status_code, r.text[:300]
 
 
-def load_users() -> list[str]:
-    f = DATA / "line_users.json"
-    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
+def bound_line_users(con: sqlite3.Connection, account_id: int) -> list[str]:
+    """Active LINE bindings of one employer account. Pairing (S05) is the only way a row gets here;
+    there is no global follower list any more, so nothing is ever broadcast."""
+    return [r["line_user_id"] for r in con.execute(
+        "SELECT line_user_id FROM line_bindings WHERE account_id=? AND revoked_at IS NULL", (account_id,))]
 
 
 TEMPLATES = {
@@ -475,9 +616,10 @@ TITLE_I18N = {
 
 
 @app.get("/api/line/status")
-def line_status():
+def line_status(acct=EMPLOYER, con: sqlite3.Connection = DB):
     token, secret = line_cfg()
-    return {"configured": bool(token and secret), "followers": len(load_users())}
+    n = len(bound_line_users(con, acct["id"]))
+    return {"configured": bool(token and secret), "bound": n, "followers": n}
 
 
 class Push(BaseModel):
@@ -485,9 +627,9 @@ class Push(BaseModel):
     lang: str = "zh"
 
 
-def _due_items(days: int):
+def _due_items(con: sqlite3.Connection, account_id: int, days: int):
     out = []
-    for o in todos()["items"]:
+    for o in _task_items(con, account_id):
         start_left = (date.fromisoformat(o["start"]) - date.today()).days if o.get("start") else None
         in_range = o["days_left"] <= days or (start_left is not None and 0 <= start_left <= days)
         if in_range and not o.get("done"):   # completed (proof verified) items are no longer reminded
@@ -523,24 +665,25 @@ def digest(items, lang="zh", limit=8):
 
 
 @app.get("/api/line/preview")
-def line_preview(days: int = 30, lang: str = "zh"):
-    items = _due_items(days)
+def line_preview(days: int = 30, lang: str = "zh", acct=EMPLOYER, con: sqlite3.Connection = DB):
+    items = _due_items(con, acct["id"], days)
     return {"count": len(items), "text": digest(items, lang) if items else ""}
 
 
 @app.post("/api/line/send")
-def line_send(body: Push):
-    items = _due_items(body.days)
+def line_send(body: Push, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    """Push only this employer's own items, only to LINE users bound to this employer."""
+    items = _due_items(con, acct["id"], body.days)
     messages = [digest(items, body.lang)] if items else []
     if not messages:
         return {"sent": 0, "preview": [], "mode": "none", "note": "近期沒有需要提醒的事項"}
     token, secret = line_cfg()
     if not (token and secret):
         return {"sent": 0, "preview": messages, "mode": "preview", "note": "尚未設定 LINE Messaging API，僅顯示預覽"}
-    users = load_users()
+    users = bound_line_users(con, acct["id"])
     if not users:
         return {"sent": 0, "preview": messages, "mode": "preview",
-                "note": "還沒有人加入官方帳號好友（或 webhook 尚未設定好）。請先用手機加好友，再按一次。"}
+                "note": "這個帳號還沒有綁定 LINE（配對功能 S05 開發中），僅顯示預覽，不會發送給任何人。"}
     sent, errors = 0, []
     for uid in users:
         code, text = line_api("push", {"to": uid, "messages": [{"type": "text", "text": m} for m in messages]})
@@ -548,12 +691,13 @@ def line_send(body: Push):
             sent += 1
         else:
             errors.append(f"{code} {text}")
-    note = f"已推播給 {sent} 位好友（1 則訊息，含 {len(items)} 項待辦）" + (f"；失敗：{errors[0]}" if errors else "")
+    note = f"已推播給此帳號綁定的 {sent} 個 LINE（1 則訊息，含 {len(items)} 項待辦）" + (f"；失敗：{errors[0]}" if errors else "")
     return {"sent": sent, "preview": messages, "mode": "line", "note": note}
 
 
 WELCOME = ("歡迎使用竹聘安 AI！\n我會在移工的法定期限（健檢、通報、續聘）快到時提醒您，每則提醒都附法條依據。\n\n"
-           "傳「待辦」可查看近期待辦。\n（決賽展示版本・資料為合成測試資料）")
+           "請先在竹聘安網頁取得配對碼並傳到這裡；綁定後傳「待辦」可查看您自己的近期待辦。\n（決賽展示版本，資料為合成測試資料）")
+NOT_BOUND = "這個 LINE 帳號尚未綁定竹聘安雇主帳號，因此不會顯示任何待辦。請先在竹聘安網頁取得配對碼。"
 
 
 @app.post("/line/webhook")
@@ -565,26 +709,35 @@ async def line_webhook(request: Request):
     if not secret or not hmac.compare_digest(sig, expect):
         raise HTTPException(403, "bad signature")
     payload = json.loads(body)
-    users = set(load_users())
-    for ev in payload.get("events", []):
-        uid = (ev.get("source") or {}).get("userId")
-        if uid and ev.get("type") in ("follow", "message"):
-            users.add(uid)
-        token = ev.get("replyToken")
-        if not token:
-            continue
-        if ev.get("type") == "follow":
-            line_api("reply", {"replyToken": token, "messages": [{"type": "text", "text": WELCOME}]})
-        elif ev.get("type") == "message" and (ev.get("message") or {}).get("type") == "text":
-            text = ev["message"].get("text", "")
-            if "待辦" in text or "提醒" in text:
-                items = _due_items(90)
-                msgs = [digest(items)] if items else ["目前 90 天內沒有待辦事項。"]
-            else:
-                msgs = ["您好！傳「待辦」可查看近期待辦；法規問題請到竹聘安網頁的「法規問答」查詢。"]
-            line_api("reply", {"replyToken": token, "messages": [{"type": "text", "text": m} for m in msgs]})
-    (DATA / "line_users.json").write_text(json.dumps(sorted(users)), encoding="utf-8")
+    con = db.connect()
+    try:
+        for ev in payload.get("events", []):
+            _line_event(con, ev)
+    finally:
+        con.close()
     return {"ok": True}
+
+
+def _line_event(con: sqlite3.Connection, ev: dict) -> None:
+    """Reply only with the bound employer's own items; an unbound LINE user gets pairing help, never data."""
+    uid = (ev.get("source") or {}).get("userId")
+    token = ev.get("replyToken")
+    if not token:
+        return
+    if ev.get("type") == "follow":
+        line_api("reply", {"replyToken": token, "messages": [{"type": "text", "text": WELCOME}]})
+    elif ev.get("type") == "message" and (ev.get("message") or {}).get("type") == "text":
+        text = ev["message"].get("text", "")
+        row = con.execute("SELECT account_id FROM line_bindings WHERE line_user_id=? AND revoked_at IS NULL",
+                          (uid,)).fetchone() if uid else None
+        if ("待辦" in text or "提醒" in text) and row is None:
+            msgs = [NOT_BOUND]
+        elif "待辦" in text or "提醒" in text:
+            items = _due_items(con, row["account_id"], 90)
+            msgs = [digest(items)] if items else ["目前 90 天內沒有待辦事項。"]
+        else:
+            msgs = ["您好！傳「待辦」可查看近期待辦；法規問題請到竹聘安網頁的「法規問答」查詢。"]
+        line_api("reply", {"replyToken": token, "messages": [{"type": "text", "text": m} for m in msgs]})
 
 
 # ---------------------------------------------------------------- static

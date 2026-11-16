@@ -1,9 +1,9 @@
-# 竹聘安決賽示範系統 API（初版，S00）
+# 竹聘安決賽示範系統 API（S01 版）
 
 本文件分成兩部分：
 
-- **A. 現有 API**：S00 基線的實際行為。依 2026-11-15 的程式碼與測試整理。
-- **B. 目標契約**：工作包第 3 節規定的 API，**尚未實作**，由 S01–S10 完成。
+- **A. 現有 API**：目前程式碼的實際行為（2026-11-17，S01 分支），每個端點都標出權限。
+- **B. 目標契約**：工作包第 3 節規定、**尚未實作**的部分，由 S02–S10 完成。
 
 改動 API 的 PR 必須同步更新本文件，附上請求／回應範例與錯誤碼。
 
@@ -13,7 +13,32 @@
 
 ## A. 現有 API（S00 基線）
 
-> ⚠️ 基線**沒有任何登入或權限檢查**，所有端點都能匿名呼叫，所有使用者共用同一份 `state.json`。只能用合成資料。
+> S01 起，資料存在 SQLite（`demo/server/data/zhupinan.db`，可用 `ZP_DB_PATH` 指定），**不再使用 `state.json`**。除了 `/api/health`、`POST /api/session`、`/line/webhook`，所有 `/api/` 端點都要登入。只能使用合成資料。
+
+### 共通規則（S01）
+
+| 情況 | 回應 |
+|---|---|
+| 未登入、Session 過期或已登出 | 401 `{"detail":"請先登入"}` 或 `{"detail":"登入已過期，請重新登入"}` |
+| 角色不符（雇主呼叫承辦人 API，或反過來） | 403 |
+| 存取別人的案件或待辦，或 ID 不存在 | **404**（不回 403，避免透露別人的 ID 是否存在） |
+| 跨站寫入（`Origin` 與 Host 不同，或 `Sec-Fetch-Site: cross-site`） | 403 `{"detail":"拒絕跨站請求"}`，請求處理程式不會執行 |
+| 所有 `/api/` 回應 | `Cache-Control: no-store` |
+
+權限代號：**公開**＝不需登入；**登入**＝任何角色；**雇主**＝`employer`；**承辦人**＝`officer`；**管理**＝示範管理帳號（目前是 `officer`）。
+
+### 登入與案件（S01 新增）
+
+| 端點 | 權限 | 請求 | 回應 | 錯誤 |
+|---|---|---|---|---|
+| `POST /api/session` | 公開 | `{"account":"employer_a","code":"<登入碼>"}` | `{account:{login_name, role, display_name, is_demo_admin}, cases:[…]}`，同時設定 Cookie `zp_session`（HttpOnly、SameSite=Lax；HTTPS 時加 Secure；有效 8 小時） | 401：帳號或登入碼錯誤（無論帳號是否存在，訊息都一樣）；同一帳號＋IP 連錯 5 次後，10 分鐘內一律回 429 |
+| `GET /api/session` | 登入 | — | 同上 | 401 |
+| `DELETE /api/session` | 公開 | — | `{ok:true}`；在伺服器端刪除 Session 並清除 Cookie | — |
+| `GET /api/cases` | 雇主 | — | `{cases:[{id, display_code, label, created_at, updated_at}]}`，只回傳自己的案件 | 401、403 |
+| `GET /api/cases/{id}` | 雇主 | — | `{case:{…}, tasks:[…]}` | 404 |
+| `POST /api/demo/reset` | 管理 | — | `{ok:true}`；在一次交易中刪除所有案件、文件、待辦、證明、LINE 綁定、通知紀錄與稽核紀錄，再重建空白的種子案件，最後清空上傳與暫存資料夾 | 401、403 |
+
+示範帳號有三個：`employer_a`（家庭看護，案件 `DEMO-A01`）、`employer_b`（產業，案件 `DEMO-B01`）、`officer`（承辦人，兼示範管理）。登入碼的設定方式見 `demo/DEVELOPMENT.md`。
 
 ### `GET /api/health`（S00 已更新）
 
@@ -46,14 +71,16 @@
 
 ### 文件與待辦
 
+以下端點都要用**雇主**帳號登入，而且只會讀寫自己的案件。
+
 | 端點 | 請求 | 回應／行為 | 錯誤 |
 |---|---|---|---|
 | `POST /api/extract` | multipart `file`（JPG/PNG/WEBP/PDF/TXT/MD） | `{file_id, filename, is_image, model, doc_type, workers:[{name, entry_date, permit_start, permit_end, event_date, evidence:{欄位:原文片段}, flags:{欄位:提示}}]}`。**原件會存到 `demo/server/uploads/`**；文字在本機遮蔽後送 Haiku，**圖片未遮蔽就送 Sonnet**。 | 413 超過 15 MB；415 格式不支援；502 模型失敗 |
-| `POST /api/obligations` | `{doc_type, workers:[{name, entry_date?, permit_start?, permit_end?, event_date?}], save=true}` | `{obligations:[…], added, calendar_years}`；`save=true` 時寫入共用的 `state.json`，同一義務不會重複寫入。 | 422 欄位格式錯誤。**`doc_type` 不認得時回 200 加空清單**，不會提示需人工確認（S03 修正） |
-| `GET /api/todos` | — | `{workers, items}`，回傳**所有人**的待辦 | — |
-| `DELETE /api/todos` | — | 重設 `state.json`；**不會刪上傳檔** | — |
-| `POST /api/todos/{tid}/assign` | `{assignee: "仲介" \| null}` | `{ok, assigned}` | 404 |
-| `POST /api/todos/{tid}/proof` | multipart `file`、`by`（預設「雇主」） | 判讀結果 `{verdict, verdict_text, completed_date, …}`；判為準時就**自動視為完成** | 404、413、415、502 |
+| `POST /api/obligations` | `{doc_type, workers:[{name, entry_date?, permit_start?, permit_end?, event_date?}], save=true, case_id?, source_filename?}` | `{obligations:[…], added, calendar_years, case_id}`。`save=true` 時寫入 `case_id`（預設為自己的第一個案件）的 `documents` 與 `tasks`；同一案件內「同一移工＋同一規則＋同一期間」由唯一索引擋下，不會重複。`save=false` 只計算、不寫入。 | 422 欄位格式錯誤。**`doc_type` 不認得時回 200 加空清單**，不會提示需人工確認（S03 修正） |
+| `GET /api/todos` | — | `{workers, items}`，只回傳自己案件的待辦。`items[].id` 是待辦 ID（字串），另含 `case_id`、`case_code`、`status` | 401、403 |
+| `DELETE /api/todos` | — | 只刪除自己案件的文件、待辦、證明，以及這些證明的檔案 | 401、403 |
+| `POST /api/todos/{tid}/assign` | `{assignee: "仲介" \| null}` | `{ok, assigned}`；狀態改為 `delegated` 或 `todo` | 404 |
+| `POST /api/todos/{tid}/proof` | multipart `file`、`by`（預設「雇主」） | 判讀結果 `{verdict, verdict_text, completed_date, …}`，存入 `proofs`，狀態改為 `proof_submitted`。**畫面仍會把判為準時或逾期的證明顯示成已完成**（沿用基線行為，S03 會改成由人工確認） | 404、413、415、502 |
 | `DELETE /api/todos/{tid}/proof` | — | `{ok}` | 404 |
 | `GET /api/todos/{tid}/proof/file` | — | 回傳證明原件 | 404 |
 
@@ -82,20 +109,20 @@
 
 ### 問答與承辦人
 
-| 端點 | 請求 | 回應 | 錯誤 |
-|---|---|---|---|
-| `POST /api/ask` | `{question}` | `{answer, citations, retrieved}`（BM25 加同義詞檢索，再交給模型回答） | 400 空問題；502 |
-| `POST /api/check-penalty` | `{text}` 裁處書草稿 | `{items:[七項要件結果], masked_preview}` | 400 草稿太短；502 |
-| `POST /api/mask-preview` | `{text}` | `{masked, pseudonyms}` 本機遮蔽預覽 | — |
+| 端點 | 權限 | 請求 | 回應 | 錯誤 |
+|---|---|---|---|---|
+| `POST /api/ask` | 登入 | `{question}` | `{answer, citations, retrieved}`（先用 BM25 加同義詞檢索，再交給模型回答） | 400：問題為空；502 |
+| `POST /api/check-penalty` | 承辦人 | `{text}`（裁處書草稿） | `{items:[七項要件結果], masked_preview}` | 403：雇主帳號；400：草稿太短；502 |
+| `POST /api/mask-preview` | 登入 | `{text}` | `{masked, pseudonyms}`（本機遮蔽預覽） | — |
 
 ### LINE
 
 | 端點 | 行為 |
 |---|---|
-| `GET /api/line/status` | `{configured, followers}` |
-| `GET /api/line/preview?days=30&lang=zh` | `{count, text}`，lang 可為 zh／id／vi |
-| `POST /api/line/send` `{days, lang}` | **推播給所有曾加好友的使用者**（`line_users.json`）。未設定金鑰時只回預覽。→ S05 改成只發給指定帳號 |
-| `POST /line/webhook` | 先用原始 body 驗證 `x-line-signature`（HMAC-SHA256），失敗回 403。follow／message 事件會把 userId 加入全域清單；傳「待辦」會回覆**全部**待辦 → S05 |
+| `GET /api/line/status`（雇主） | `{configured, bound, followers}`；`bound` 是這個帳號目前有效的 LINE 綁定數 |
+| `GET /api/line/preview?days=30&lang=zh`（雇主） | `{count, text}`，只用自己的待辦；`lang` 可為 zh、id、vi |
+| `POST /api/line/send` `{days, lang}`（雇主） | 只把**自己的**待辦推播給**綁定在自己帳號**的 LINE 使用者（`line_bindings`）。S01 起不再有全域好友清單。配對功能（S05）完成前沒有任何綁定，因此只回預覽：`mode:"preview"`、`sent:0` |
+| `POST /line/webhook`（公開，以簽章驗證） | 先用原始 body 驗證 `x-line-signature`（HMAC-SHA256），驗證失敗回 403。使用者傳「待辦」時：已綁定的帳號只會收到該雇主自己的待辦；**未綁定的帳號只會收到配對說明，不含任何資料**。配對碼由 S05 實作 |
 
 ---
 
@@ -103,8 +130,6 @@
 
 | 端點 | 用途 | 權限與關鍵回應 | 工作包 |
 |---|---|---|---|
-| `POST /api/session`、`DELETE /api/session` | 登入／登出 | 示範帳號＋一次性登入碼；401、429；過期失效 | S01 |
-| `GET /api/cases`、`GET /api/cases/{id}` | 案件清單／詳情 | 只能讀自己的案件；無權限回 404 | S01 |
 | `POST /api/documents/extract` | 暫時擷取欄位 | `field, value, source_excerpt, warning, document_kind`；不寫入案件 | S02 |
 | `POST /api/documents/confirm` | 確認欄位並產生待辦 | 必填 `case_id`；回傳 `task_ids`、警示 | S02／S03 |
 | `GET/PATCH /api/tasks/{id}` | 詳情與狀態 | 檢查 owner；只允許合法的狀態轉移 | S03 |
@@ -115,6 +140,6 @@
 | `POST /api/missing/guide` | 聯絡不上移工 | 回傳狀態、缺少的事實、聯絡資訊、法源；不下「行蹤不明」的結論 | S06 |
 | `POST /api/qa` | 個案問答 | 只使用已確認的個案事實 | S07 |
 | `POST /api/penalty/check` | 處分書檢核 | 只限 officer；雇主回 403 | S08 |
-| `POST /api/demo/reset` | 重置展示資料 | 只限示範管理帳號 | S10 |
+| `POST /api/demo/reset`（重建合成案件） | 重置後重建固定的合成文件與待辦（S01 目前只重建空白案件） | 只限示範管理帳號 | S10 |
 
-共通要求：匿名呼叫回 401；角色不符回 403；跨站的變更請求檢查 `Origin`；個案與問答回應帶 `Cache-Control: no-store`。
+以下共通要求已在 S01 落實：匿名呼叫回 401、角色不符回 403、跨站寫入回 403、所有 `/api/` 回應一律 `no-store`。新增端點時必須沿用 `auth.require_*` 依賴與 `owned_case()`，並在 `demo/tests/` 加上越權測試。
