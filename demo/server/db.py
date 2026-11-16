@@ -35,7 +35,8 @@ def now() -> str:
 def connect() -> sqlite3.Connection:
     p = db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(p, timeout=10)
+    # one connection per request, used sequentially; async handlers may run it on another thread
+    con = sqlite3.connect(p, timeout=10, check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     return con

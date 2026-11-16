@@ -16,7 +16,11 @@ async function api(path, opts = {}) {
   let data = null;
   try { data = await r.json(); } catch { /* ignore */ }
   if (r.status === 401 && path !== '/api/session') showLogin((data && data.detail) || '請先登入');
-  if (!r.ok) throw new Error((data && data.detail) || `伺服器錯誤（${r.status}）`);
+  if (!r.ok) {
+    const err = new Error((data && data.detail) || `伺服器錯誤（${r.status}）`);
+    err.status = r.status; err.data = data || {};
+    throw err;
+  }
   return data;
 }
 
@@ -157,25 +161,54 @@ async function uploadDocument(file) {
   $('upload-description').textContent = `${(file.size / 1024).toFixed(0)} KB`;
   $('upload-status').className = 'status warning'; $('upload-status').textContent = '辨識中';
   $('extract-empty').hidden = true; $('worker-form').hidden = true; $('result-card').hidden = true;
+  $('extract-blocked').hidden = true; $('sent-preview').hidden = true;
   $('extract-loading').hidden = false;
+  discardExtract();
   const isImg = /\.(jpe?g|png)$/i.test(file.name);
   $('loading-text').textContent = isImg ? 'AI 正在閱讀掃描圖片…（約 20～40 秒）' : 'AI 正在閱讀公文…（約 10～20 秒）';
   $('flag-count').className = 'status neutral'; $('flag-count').textContent = '辨識中';
   setStep(1);
   const fd = new FormData(); fd.append('file', file);
   try {
-    const data = await api('/api/extract', { method: 'POST', body: fd });
+    const data = await api('/api/documents/extract', { method: 'POST', body: fd });
     lastExtract = data;
     renderExtract(data);
     $('upload-status').className = 'status ok'; $('upload-status').textContent = '已完成辨識';
     setStep(2);
   } catch (err) {
-    $('extract-loading').hidden = true; $('extract-empty').hidden = false;
-    $('upload-status').className = 'status danger'; $('upload-status').textContent = '辨識失敗';
+    $('extract-loading').hidden = true;
+    $('upload-status').className = 'status danger';
+    if (err.data && err.data.code === 'real_image_blocked') {
+      $('upload-status').textContent = '未送出';
+      $('flag-count').className = 'status warning'; $('flag-count').textContent = '圖片未送出';
+      $('blocked-text').textContent = err.message;
+      $('extract-blocked').hidden = false;
+      $('manual-entry').focus();
+      return;
+    }
+    $('extract-empty').hidden = false;
+    $('upload-status').textContent = '辨識失敗';
     $('flag-count').textContent = '辨識失敗';
     notify(err.message);
   }
 }
+
+/* an unconfirmed extraction is dropped on the server when the user moves on */
+function discardExtract() {
+  const x = lastExtract && lastExtract.extract_id;
+  if (x) api(`/api/documents/extract/${x}`, { method: 'DELETE' }).catch(() => {});
+  lastExtract = null;
+}
+$('manual-entry').addEventListener('click', () => {
+  lastExtract = { doc_type: $('doc-type').value, is_image: false, model: '', workers: [{ name: '', flags: {}, evidence: {} }] };
+  $('extract-blocked').hidden = true; $('worker-form').hidden = false;
+  $('uploaded-file').hidden = true;
+  renderWorkerTable();
+  $('flag-count').className = 'status neutral'; $('flag-count').textContent = '手動輸入';
+  $('model-note').textContent = '手動輸入：日期以您填寫的為準';
+  setStep(2);
+  document.querySelector('#worker-rows input[data-k=name]').focus();
+});
 
 const FIELDS = {
   '聘僱許可函': [['entry_date', '入國日'], ['permit_start', '許可起日'], ['permit_end', '許可迄日']],
@@ -190,6 +223,7 @@ const FIELDS = {
 
 /* 一站式服務：入國前尚無公文，直接開啟空白表單 */
 $('onestop-btn').addEventListener('click', () => {
+  discardExtract(); $('sent-preview').hidden = true; $('extract-blocked').hidden = true;
   lastExtract = { doc_type: '家事移工預定入國', is_image: false, model: '', workers: [{ name: '', entry_date: '', flags: {}, evidence: {} }] };
   $('uploaded-file').hidden = true;
   $('extract-empty').hidden = true; $('extract-loading').hidden = true; $('result-card').hidden = true;
@@ -205,6 +239,7 @@ $('onestop-btn').addEventListener('click', () => {
 
 /* 失聯不是公文：直接開啟空白表單讓雇主填寫 */
 $('abscond-btn').addEventListener('click', () => {
+  discardExtract(); $('sent-preview').hidden = true; $('extract-blocked').hidden = true;
   lastExtract = { doc_type: '移工失聯', is_image: false, model: '', workers: [{ name: '', event_date: '', job: '製造', flags: {}, evidence: {} }] };
   $('uploaded-file').hidden = true;
   $('extract-empty').hidden = true; $('extract-loading').hidden = true; $('result-card').hidden = true;
@@ -227,13 +262,14 @@ function renderExtract(data) {
   const flags = (data.workers || []).reduce((n, w) => n + Object.keys(w.flags || {}).length, 0);
   $('flag-count').className = 'status ' + (flags ? 'warning' : 'ok');
   $('flag-count').textContent = flags ? `${flags} 項請再確認` : '辨識完成';
-  $('model-note').textContent = `${data.is_image ? '掃描圖片' : '文字公文'}・使用 Claude ${data.model === 'sonnet' ? 'Sonnet' : 'Haiku'} 判讀・請以原件核對`
-    + (data.is_image ? '・⚠ 掃描圖片無法先在本機遮蔽個資，建議改傳 PDF 或文字檔' : '・🔒 姓名與證號已在本機遮蔽後才送給 AI');
+  $('model-note').textContent = `${data.is_image ? '合成範例掃描圖' : '文字公文'}・Claude ${data.model === 'sonnet' ? 'Sonnet' : 'Haiku'} 判讀・有標示的日期請勾選「已核對原件」`;
+  $('sent-preview').hidden = !data.masked_preview;
+  $('sent-preview-text').textContent = data.masked_preview || '';
   const btn = document.querySelector('#worker-form button[type=submit]');
   btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
   btn.classList.add('pulse');
   setTimeout(() => btn.classList.remove('pulse'), 4000);
-  notify('AI 已讀完公文。請核對日期，再按右下角「確認無誤，產生待辦」。');
+  notify(flags ? `AI 已讀完公文。有 ${flags} 個日期需要對照原件，核對後請勾選「已核對原件」。` : 'AI 已讀完公文。請核對日期，再按「確認無誤，產生待辦」。');
 }
 
 function renderWorkerTable() {
@@ -251,7 +287,8 @@ function renderWorkerTable() {
         const src = (w.evidence || {})[k];
         return `<td class="${flag ? 'flagged' : ''}"><input type="date" data-k="${k}" value="${esc(w[k] || '')}">
           ${src ? `<small>原文：「${esc(src)}」</small>` : (w[k] || isManual ? '' : '<small>文件中未找到</small>')}
-          ${flag ? `<span class="field-warning">${esc(flag)}</span>` : ''}</td>`;
+          ${flag ? `<span class="field-warning">需核對：${esc(flag)}</span>
+            <label class="check-original"><input type="checkbox" data-check="${i}:${k}"> 已核對原件</label>` : ''}</td>`;
       }).join('')}</tr>`).join('');
 }
 $('doc-type').addEventListener('change', renderWorkerTable);
@@ -272,7 +309,12 @@ $('worker-form').addEventListener('submit', async e => {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner small-spinner"></span>產生中…';
   try {
-    const r = await api('/api/obligations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ doc_type: type, workers, save: true }) });
+    const checked = all('#worker-rows [data-check]').filter(c => c.checked).map(c => c.dataset.check);
+    const body = { document_kind: type, workers, checked };
+    if (lastExtract && lastExtract.extract_id) body.extract_id = lastExtract.extract_id;
+    const r = await api('/api/documents/confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (lastExtract) lastExtract.extract_id = null;  /* consumed on the server */
+    (r.warnings || []).forEach(w => notify(w));
     const total = r.obligations.length;
     const msg = r.added === total ? `已加入 ${total} 項待辦`
       : r.added === 0 ? `這 ${total} 項待辦先前已加入過，未重複新增` : `已新增 ${r.added} 項待辦（${total - r.added} 項先前已加入過）`;
@@ -285,7 +327,13 @@ $('worker-form').addEventListener('submit', async e => {
     setTimeout(() => { btn.classList.remove('done'); btn.innerHTML = btnHtml; btn.disabled = false; }, 3000);
   } catch (err) {
     btn.innerHTML = btnHtml; btn.disabled = false;
-    notify('產生待辦失敗：' + err.message);
+    const missing = (err.data && err.data.unchecked) || [];
+    missing.forEach(key => {
+      const box = document.querySelector(`#worker-rows [data-check="${key}"]`);
+      if (box) box.closest('td').classList.add('needs-check');
+    });
+    if (missing.length) document.querySelector(`#worker-rows [data-check="${missing[0]}"]`).focus();
+    notify((missing.length ? '還沒核對：' : '產生待辦失敗：') + err.message);
   }
 });
 
@@ -365,7 +413,7 @@ function proofCell(o) {
       <small>${esc(p.doc_kind || '證明文件')}・${esc(p.date_label || '完成日')} ${esc(p.completed_date || '—')}</small>
       ${p.evidence ? `<small>原文：「${esc(p.evidence)}」</small>` : ''}
       <small>${esc(p.uploaded_by)}上傳 ${esc((p.uploaded_at || '').replace('T', ' '))}</small>
-      <div class="proof-actions"><a href="/api/todos/${o.id}/proof/file" target="_blank" rel="noopener">查看證明</a><button type="button" class="text-button" data-unproof="${o.id}">移除</button></div></div>`;
+      <div class="proof-actions"><span class="muted">原件不保存</span><button type="button" class="text-button" data-unproof="${o.id}">移除</button></div></div>`;
   }
   return `<div class="proof-box"><span class="status neutral">尚未上傳</span>${assignBtn}
     <div class="proof-actions"><button type="button" class="text-button" data-proof="${o.id}">上傳證明</button>

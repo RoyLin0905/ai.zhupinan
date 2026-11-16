@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 import re
 import shutil
 import subprocess
@@ -31,16 +33,19 @@ def _claude() -> str:
     raise LLMError("找不到 claude CLI，請先安裝並登入（claude auth login）")
 
 
-def call(system: str, user: str, model: str = "haiku", image: Path | None = None, timeout: int = 240) -> str:
+def call(system: str, user: str, model: str = "haiku", image: Path | None = None, timeout: int = 240,
+         cache: bool = True) -> str:
+    """cache=False for anything a user uploaded: their (masked) content must not be kept on disk."""
     key_src = json.dumps([system, user, model, hashlib.sha256(image.read_bytes()).hexdigest() if image else None])
     key = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:24]
     hit = CACHE / f"{key}.json"
-    if hit.exists():
+    if cache and hit.exists():
         return json.loads(hit.read_text(encoding="utf-8"))["text"]
 
-    sp = TMP / f"sys_{key}.txt"
+    exe = _claude()  # fail before writing anything if the CLI is missing
+    sp = TMP / f"sys_{key}_{os.getpid()}_{time.monotonic_ns()}.txt"
     sp.write_text(system, encoding="utf-8")
-    cmd = [_claude(), "-p", "--model", model, "--system-prompt-file", str(sp),
+    cmd = [exe, "-p", "--model", model, "--system-prompt-file", str(sp),
            "--strict-mcp-config", "--no-session-persistence", "--output-format", "json"]
     if image is not None:
         cmd += ["--tools", "Read", "--allowedTools", "Read", "--add-dir", str(image.parent)]
@@ -52,6 +57,8 @@ def call(system: str, user: str, model: str = "haiku", image: Path | None = None
                            timeout=timeout, cwd=str(ROOT))
     except subprocess.TimeoutExpired as e:
         raise LLMError("AI 回應逾時，請再試一次") from e
+    finally:
+        sp.unlink(missing_ok=True)  # the prompt file is only needed while the CLI runs
     try:
         env = json.loads(p.stdout)
     except json.JSONDecodeError as e:
@@ -62,7 +69,8 @@ def call(system: str, user: str, model: str = "haiku", image: Path | None = None
             raise LLMError("Claude CLI 登入已過期，請在終端機執行 claude auth login")
         raise LLMError(f"AI 呼叫失敗：{msg[:200]}")
     text = env.get("result") or ""
-    hit.write_text(json.dumps({"text": text, "model": model}, ensure_ascii=False), encoding="utf-8")
+    if cache:
+        hit.write_text(json.dumps({"text": text, "model": model}, ensure_ascii=False), encoding="utf-8")
     return text
 
 

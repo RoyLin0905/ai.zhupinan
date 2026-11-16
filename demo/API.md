@@ -1,9 +1,9 @@
-# 竹聘安決賽示範系統 API（S01 版）
+# 竹聘安決賽示範系統 API（S02 版）
 
 本文件分成兩部分：
 
-- **A. 現有 API**：目前程式碼的實際行為（2026-11-17，S01 分支），每個端點都標出權限。
-- **B. 目標契約**：工作包第 3 節規定、**尚未實作**的部分，由 S02–S10 完成。
+- **A. 現有 API**：目前程式碼的實際行為（2026-11-17，S02 分支），每個端點都標出權限。
+- **B. 目標契約**：工作包第 3 節規定、**尚未實作**的部分，由 S03–S10 完成。
 
 改動 API 的 PR 必須同步更新本文件，附上請求／回應範例與錯誤碼。
 
@@ -71,18 +71,37 @@
 
 ### 文件與待辦
 
+### 文件擷取與確認（S02）
+
+上傳一律依**檔案內容**判斷格式，不看副檔名；原始位元組只留在記憶體中，**不保存原件**。
+
+| 檢查 | 失敗時回應 |
+|---|---|
+| 大於 15 MB | 413「檔案太大（上限 15 MB）」 |
+| 副檔名不是 jpg／jpeg／png／pdf／txt，或內容和副檔名不符（例如把 PNG 改名成 .txt），或文字檔含二進位內容 | 415 |
+| PDF 損毀、有密碼、沒有頁面 | 422「PDF 檔案損毀或無法開啟」 |
+| PDF 超過 10 頁 | 413 |
+| **圖片，或沒有文字的掃描 PDF，且不是團隊的合成範例**（以 SHA-256 比對 `demo/web/samples`、`validation/docs`、`validation/docs_holiday`） | 422 `{"detail":"為保護個資…","code":"real_image_blocked"}`，**不會呼叫外部模型** |
+
+| 端點 | 權限 | 請求 | 回應 | 錯誤 |
+|---|---|---|---|---|
+| `POST /api/documents/extract`（舊路徑 `/api/extract` 是同一個處理程式） | 雇主 | multipart `file` | `{extract_id, document_kind, fields:[{worker, field, value, source_excerpt, warning}], workers:[…舊格式，含 flags/evidence], source:{type, synthetic_sample, notes}, masked_preview, privacy_note, model, is_image}`。**不寫入案件。** 文字檔在本機遮蔽後才送給模型，`masked_preview` 就是實際送出的內容。`warning` 是白話的需核對理由（掃描件、國字日期、民國年換算、找不到原文），不提供信心分數。辨識結果只存在伺服器記憶體中，30 分鐘後失效 | 上表各項；502 模型失敗 |
+| `DELETE /api/documents/extract/{extract_id}` | 雇主 | — | `{ok:true}`，丟棄尚未確認的辨識結果 | 404 |
+| `POST /api/documents/confirm` | 雇主 | `{document_kind, workers:[{name, entry_date?, permit_start?, permit_end?, event_date?, notify_date?, job?}], extract_id?, checked:["0:entry_date",…], case_id?}` | `{task_ids, added, warnings, obligations, case_id, calendar_years}`。只保存姓名、工作類別與日期欄位，外加原檔的 SHA-256。不帶 `extract_id` 時視為使用者手動輸入 | **422 `{"detail":…,"unchecked":["0:entry_date"]}`**：有 `warning` 的日期如果維持 AI 讀到的值，就必須列在 `checked` 中（改過的值視為使用者已確認）；404：`extract_id` 不存在、已逾時、已用過或屬於別人 |
+
+不認得的 `document_kind` 會回 200、`task_ids:[]`，並在 `warnings` 提示「需人工確認」。
+
 以下端點都要用**雇主**帳號登入，而且只會讀寫自己的案件。
 
 | 端點 | 請求 | 回應／行為 | 錯誤 |
 |---|---|---|---|
-| `POST /api/extract` | multipart `file`（JPG/PNG/WEBP/PDF/TXT/MD） | `{file_id, filename, is_image, model, doc_type, workers:[{name, entry_date, permit_start, permit_end, event_date, evidence:{欄位:原文片段}, flags:{欄位:提示}}]}`。**原件會存到 `demo/server/uploads/`**；文字在本機遮蔽後送 Haiku，**圖片未遮蔽就送 Sonnet**。 | 413 超過 15 MB；415 格式不支援；502 模型失敗 |
-| `POST /api/obligations` | `{doc_type, workers:[{name, entry_date?, permit_start?, permit_end?, event_date?}], save=true, case_id?, source_filename?}` | `{obligations:[…], added, calendar_years, case_id}`。`save=true` 時寫入 `case_id`（預設為自己的第一個案件）的 `documents` 與 `tasks`；同一案件內「同一移工＋同一規則＋同一期間」由唯一索引擋下，不會重複。`save=false` 只計算、不寫入。 | 422 欄位格式錯誤。**`doc_type` 不認得時回 200 加空清單**，不會提示需人工確認（S03 修正） |
+| `POST /api/obligations` | `{doc_type, workers:[{name, entry_date?, permit_start?, permit_end?, event_date?}], save=true, case_id?, source_filename?}` | 計算期限預覽，前端不再用它寫入。`save=true` 等同手動輸入。回傳 `{obligations:[…], added, calendar_years, case_id}`。`save=true` 時寫入 `case_id`（預設為自己的第一個案件）的 `documents` 與 `tasks`；同一案件內「同一移工＋同一規則＋同一期間」由唯一索引擋下，不會重複。`save=false` 只計算、不寫入。 | 422 欄位格式錯誤。**`doc_type` 不認得時回 200 加空清單**，不會提示需人工確認（S03 修正） |
 | `GET /api/todos` | — | `{workers, items}`，只回傳自己案件的待辦。`items[].id` 是待辦 ID（字串），另含 `case_id`、`case_code`、`status` | 401、403 |
 | `DELETE /api/todos` | — | 只刪除自己案件的文件、待辦、證明，以及這些證明的檔案 | 401、403 |
 | `POST /api/todos/{tid}/assign` | `{assignee: "仲介" \| null}` | `{ok, assigned}`；狀態改為 `delegated` 或 `todo` | 404 |
-| `POST /api/todos/{tid}/proof` | multipart `file`、`by`（預設「雇主」） | 判讀結果 `{verdict, verdict_text, completed_date, …}`，存入 `proofs`，狀態改為 `proof_submitted`。**畫面仍會把判為準時或逾期的證明顯示成已完成**（沿用基線行為，S03 會改成由人工確認） | 404、413、415、502 |
+| `POST /api/todos/{tid}/proof` | multipart `file`、`by`（預設「雇主」） | 上傳檢查與文件相同（真實圖片同樣會被擋下）。判讀時**不送移工姓名**，姓名比對在本機進行。**不保存原件**。判讀結果 `{verdict, verdict_text, completed_date, …, original_kept:false}` 存入 `proofs`，狀態改為 `proof_submitted`。**畫面仍會把判為準時或逾期的證明顯示成已完成**（沿用基線行為，S03 會改成由人工確認） | 404、413、415、502 |
 | `DELETE /api/todos/{tid}/proof` | — | `{ok}` | 404 |
-| `GET /api/todos/{tid}/proof/file` | — | 回傳證明原件 | 404 |
+| `GET /api/todos/{tid}/proof/file` | — | S02 起一律回 404「系統不保存證明原件」 | 404 |
 
 `doc_type` 的有效值（`rules.compute`）：`入國通報受理證明書`、`聘僱許可函`、`期滿續聘許可函`、`再檢查診斷證明書`、`住宿地點變更`、`家事移工預定入國`、`移工失聯`、`聘僱關係終止`。
 
@@ -130,8 +149,6 @@
 
 | 端點 | 用途 | 權限與關鍵回應 | 工作包 |
 |---|---|---|---|
-| `POST /api/documents/extract` | 暫時擷取欄位 | `field, value, source_excerpt, warning, document_kind`；不寫入案件 | S02 |
-| `POST /api/documents/confirm` | 確認欄位並產生待辦 | 必填 `case_id`；回傳 `task_ids`、警示 | S02／S03 |
 | `GET/PATCH /api/tasks/{id}` | 詳情與狀態 | 檢查 owner；只允許合法的狀態轉移 | S03 |
 | `POST /api/tasks/{id}/proof`、`/confirm` | 證明判讀／人工確認完成 | 兩步分開；判讀結果不會自動變成 `done` | S03 |
 | `POST /api/line/pair-code`、`DELETE /api/line/binding` | 配對／解除綁定 | 一次性配對碼，10 分鐘失效 | S05 |

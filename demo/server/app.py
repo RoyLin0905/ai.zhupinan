@@ -29,6 +29,7 @@ VALID = HERE.parent.parent / "validation" / "scripts"
 sys.path.insert(0, str(VALID))
 
 import auth  # noqa: E402
+import documents  # noqa: E402
 import db  # noqa: E402
 import llm  # noqa: E402
 import penalty as pen_mod  # noqa: E402
@@ -146,6 +147,8 @@ def get_case(case_id: int, acct=EMPLOYER, con: sqlite3.Connection = DB):
 @app.post("/api/demo/reset")
 def demo_reset(acct=Depends(auth.require_demo_admin), con: sqlite3.Connection = DB):
     db.reset_demo(con)
+    documents.forget_account(None)
+    shutil.rmtree(documents.tmp_root(), ignore_errors=True)
     for folder in (UPLOADS, llm.TMP):
         if folder.exists():
             shutil.rmtree(folder, ignore_errors=True)
@@ -161,66 +164,66 @@ DEMO_EXTRACT_SYS = EXTRACT_SYS + """
 只列出非 null 的欄位，原文片段照抄文件（例如「一一五年三月十日」），不要改寫。"""
 
 
-def ingest(raw: bytes, filename: str, folder: Path, prefix: str = ""):
-    """Save an upload; return (path, image_path_or_None, text_or_None)."""
-    suffix = Path(filename or "upload").suffix.lower()
-    if len(raw) > 15 * 1024 * 1024:
-        raise HTTPException(413, "檔案太大（上限 15MB）")
-    fid = prefix + uuid.uuid4().hex[:10]
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{fid}{suffix}"
-    path.write_bytes(raw)
-    image, text_doc = None, None
-    if suffix in (".png", ".jpg", ".jpeg", ".webp"):
-        image = path
-    elif suffix == ".pdf":
-        import fitz  # PyMuPDF
-        doc = fitz.open(path)
-        page_text = "\n".join(p.get_text() for p in doc)
-        if len(page_text.strip()) > 50:
-            text_doc = page_text
-        else:
-            image = folder / f"{fid}.png"
-            doc[0].get_pixmap(dpi=150).save(image)
-    elif suffix in (".txt", ".md"):
-        text_doc = raw.decode("utf-8", errors="replace")
-    else:
-        raise HTTPException(415, "請上傳圖片（JPG/PNG）、PDF 或文字檔")
-    return path, image, text_doc
+DATE_FIELDS = ("entry_date", "permit_start", "permit_end", "event_date", "notify_date")
+KEEP_FIELDS = ("name", "job") + DATE_FIELDS   # the only worker fields stored after confirmation
 
 
-def read_with_llm(system: str, image: Path | None, text_doc: str | None, intro: str):
-    """Images go to Sonnet (validation: Haiku 0% on scans, Sonnet 78.6%); text goes to Haiku."""
+def read_with_llm(system: str, up: documents.Upload, intro: str):
+    """Send one checked upload to the model. Returns (data, model, masked_preview).
+    Text is masked locally first; a synthetic scan is written to a private temp file only for the call."""
     try:
-        if image is not None:
-            # pixels cannot be masked locally; the UI tells the user (government version: on-prem model)
-            out, model = llm.call(system, "請只輸出 JSON。", model="sonnet", image=image), "sonnet"
-            return llm.parse_json(out), model
-        masked, mapping = mask(text_doc)
-        out, model = llm.call(system + PROMPT_NOTE, intro + "\n\n" + masked, model="haiku"), "haiku"
-        return restore(llm.parse_json(out), mapping), model
+        if up.is_image:
+            with documents.image_file(up) as path:
+                out = llm.call(system, "請只輸出 JSON。", model="sonnet", image=path, cache=up.synthetic_sample)
+            return llm.parse_json(out), "sonnet", None
+        masked, mapping = mask(up.text or "")
+        out = llm.call(system + PROMPT_NOTE, intro + "\n\n" + masked, model="haiku", cache=up.synthetic_sample)
+        return restore(llm.parse_json(out), mapping), "haiku", masked
     except llm.LLMError as e:
         raise HTTPException(502, str(e)) from e
 
 
-@app.post("/api/extract")
+async def read_upload(file: UploadFile) -> documents.Upload:
+    raw = await file.read(documents.MAX_BYTES + 1)
+    try:
+        return documents.inspect(raw, file.filename or "")
+    finally:
+        del raw  # only the checked copy (text or scan bytes) lives on, in memory
+
+
+@app.post("/api/documents/extract")
+@app.post("/api/extract")   # pre-S02 path kept for older pages; same checks
 async def extract(file: UploadFile = File(...), acct=EMPLOYER):
-    raw = await file.read()
-    path, image, text_doc = ingest(raw, file.filename, UPLOADS)
-    fid = path.stem
-    data, model = read_with_llm(DEMO_EXTRACT_SYS, image, text_doc, "以下是雇主上傳的文件內容：")
-    # flag fields that need human confirmation
-    for w in data.get("workers", []):
+    """Read a document for the user to check. Writes nothing to the case."""
+    up = await read_upload(file)
+    data, model, masked = read_with_llm(DEMO_EXTRACT_SYS, up, "以下是雇主上傳的文件內容：")
+    kind = data.get("doc_type") or ""
+    fields, flagged, workers = [], {}, []
+    for i, w in enumerate(data.get("workers") or []):
+        evidence = w.get("evidence") or {}
         flags = {}
-        for k, src in (w.get("evidence") or {}).items():
-            if any(c in (src or "") for c in "〇一二三四五六七八九十"):
-                flags[k] = "國字日期，請再確認"
-        if image is not None:
-            for k in ("entry_date", "permit_start", "permit_end", "event_date"):
-                if w.get(k) and k not in flags:
-                    flags[k] = "掃描文件，請核對原件"
-        w["flags"] = flags
-    return {"file_id": fid, "filename": file.filename, "is_image": image is not None, "model": model, **data}
+        for k in DATE_FIELDS:
+            if not w.get(k):
+                continue
+            warn = documents.field_warning(evidence.get(k), up.is_image)
+            fields.append({"worker": i, "field": k, "value": w.get(k), "source_excerpt": evidence.get(k), "warning": warn})
+            if warn:
+                flags[k] = warn
+                flagged[f"{i}:{k}"] = w.get(k)
+        workers.append({**{k: w.get(k) for k in KEEP_FIELDS if k in w}, "evidence": evidence, "flags": flags})
+    xid = documents.remember(acct["id"], kind, up, flagged)
+    return {"extract_id": xid, "document_kind": kind, "doc_type": kind, "fields": fields, "workers": workers,
+            "filename": file.filename, "is_image": up.is_image, "model": model,
+            "source": {"type": up.kind, "synthetic_sample": up.synthetic_sample, "notes": up.notes},
+            "masked_preview": masked,
+            "privacy_note": ("合成範例掃描圖：僅限團隊合成文件，真實圖片不會送出" if up.is_image
+                             else "以下是實際送給 AI 的內容：姓名、證號、地址等已在本機遮蔽")}
+
+
+@app.delete("/api/documents/extract/{xid}")
+def cancel_extract(xid: str, acct=EMPLOYER):
+    documents.take(xid, acct["id"])
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- obligations
@@ -263,39 +266,96 @@ def with_office(o: dict) -> dict:
     return o
 
 
-@app.post("/api/obligations")
-def obligations(body: Confirmed, acct=EMPLOYER, con: sqlite3.Connection = DB):
-    """Compute deadlines with the deterministic rules; with save=true, store them in the caller's own case."""
-    case = owned_case(con, acct, body.case_id) if body.save else None
+def _compute_items(kind: str, workers: list[dict]) -> list[dict]:
     items = []
-    for w in body.workers:
-        for o in compute(body.doc_type, w):
+    for w in workers:
+        for o in compute(kind, w):
             d = o.to_dict()
             d["days_left"] = (date.fromisoformat(d["due"]) - date.today()).days
             items.append(with_office(d))
     items.sort(key=lambda x: x["start"] or x["due"])
+    return items
+
+
+def _save_document(con: sqlite3.Connection, acct, case, kind: str, workers: list[dict], items: list[dict],
+                   filename: str | None, digest: str | None) -> tuple[int, list[int], int]:
+    """Store only the confirmed fields (no original) and the tasks, in one transaction."""
+    kept = [{k: w.get(k) for k in KEEP_FIELDS if w.get(k)} for w in workers]
+    fields = json.dumps({"doc_type": kind, "workers": kept}, ensure_ascii=False, sort_keys=True)
+    added, task_ids = 0, []
+    with db.tx(con):
+        doc_id = con.execute(
+            "INSERT INTO documents(case_id, kind, source_filename, confirmed_fields_json, confirmed_at, source_digest) "
+            "VALUES (?,?,?,?,?,?)",
+            (case["id"], kind, filename, fields, db.now(), digest or hashlib.sha256(fields.encode("utf-8")).hexdigest())).lastrowid
+        for o in items:
+            cur = con.execute(
+                "INSERT OR IGNORE INTO tasks(case_id, document_id, rule_key, worker, worker_norm, title, start_date, "
+                "due_date, law_ref, note, office, official_url, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (case["id"], doc_id, o["key"], o["worker"], _norm_worker(o["worker"]), o["title"], o.get("start"),
+                 o["due"], o.get("basis"), o.get("note"), o.get("office"), (o.get("online") or {}).get("url"), db.now()))
+            added += cur.rowcount
+            row = con.execute(
+                "SELECT id FROM tasks WHERE case_id=? AND worker_norm=? AND rule_key=? AND IFNULL(start_date,'')=? AND due_date=?",
+                (case["id"], _norm_worker(o["worker"]), o["key"], o.get("start") or "", o["due"])).fetchone()
+            task_ids.append(row["id"])
+        con.execute("UPDATE cases SET updated_at=? WHERE id=?", (db.now(), case["id"]))
+        db.audit(con, acct["id"], case["id"], "document", doc_id, f"confirm:{added}_tasks")
+    return doc_id, task_ids, added
+
+
+@app.post("/api/obligations")
+def obligations(body: Confirmed, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    """Compute deadlines with the deterministic rules. save=true stores user-typed values directly
+    (manual entry); documents read by the AI go through /api/documents/confirm instead."""
+    case = owned_case(con, acct, body.case_id) if body.save else None
+    items = _compute_items(body.doc_type, body.workers)
     added = len(items)
     if body.save:
-        added = 0
-        fields = json.dumps({"doc_type": body.doc_type, "workers": body.workers}, ensure_ascii=False, sort_keys=True)
-        with db.tx(con):
-            doc_id = con.execute(
-                "INSERT INTO documents(case_id, kind, source_filename, confirmed_fields_json, confirmed_at, source_digest) "
-                "VALUES (?,?,?,?,?,?)",
-                (case["id"], body.doc_type, body.source_filename, fields, db.now(),
-                 hashlib.sha256(fields.encode("utf-8")).hexdigest())).lastrowid
-            for o in items:
-                cur = con.execute(
-                    "INSERT OR IGNORE INTO tasks(case_id, document_id, rule_key, worker, worker_norm, title, start_date, "
-                    "due_date, law_ref, note, office, official_url, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (case["id"], doc_id, o["key"], o["worker"], _norm_worker(o["worker"]), o["title"], o.get("start"),
-                     o["due"], o.get("basis"), o.get("note"), o.get("office"),
-                     (o.get("online") or {}).get("url"), db.now()))
-                added += cur.rowcount
-            con.execute("UPDATE cases SET updated_at=? WHERE id=?", (db.now(), case["id"]))
-            db.audit(con, acct["id"], case["id"], "document", doc_id, f"confirm:{added}_tasks")
+        _, _, added = _save_document(con, acct, case, body.doc_type, body.workers, items, body.source_filename, None)
     return {"obligations": items, "added": added, "calendar_years": sorted(CAL_YEARS),
             "case_id": case["id"] if case else None}
+
+
+class ConfirmDoc(BaseModel):
+    document_kind: str
+    workers: list[dict]
+    extract_id: str | None = None        # omitted = manual entry typed by the user
+    checked: list[str] = []              # "worker_index:field" the user ticked as checked against the original
+    case_id: int | None = None
+
+
+RULE_KINDS = {"入國通報受理證明書", "聘僱許可函", "期滿續聘許可函", "再檢查診斷證明書", "住宿地點變更",
+              "家事移工預定入國", "移工失聯", "聘僱關係終止"}
+
+
+@app.post("/api/documents/confirm")
+def confirm_document(body: ConfirmDoc, acct=EMPLOYER, con: sqlite3.Connection = DB):
+    """The only way AI-read dates become tasks: every flagged date must be ticked as checked, or edited."""
+    case = owned_case(con, acct, body.case_id)
+    pending = documents.take(body.extract_id, acct["id"], consume=False) if body.extract_id else None
+    if pending:
+        unchecked = []
+        for key, extracted in pending.flagged.items():
+            i, k = key.split(":", 1)
+            current = body.workers[int(i)].get(k) if int(i) < len(body.workers) else None
+            if current and current == extracted and key not in body.checked:
+                unchecked.append(key)
+        if unchecked:
+            return JSONResponse({"detail": "有日期尚未核對原件，請逐一勾選「已核對」或修改後再確認", "unchecked": unchecked},
+                                status_code=422)
+    warnings = []
+    if body.document_kind not in RULE_KINDS:
+        warnings.append("這種文件沒有對應的期限規則，未產生待辦；需人工確認是否有法定期限")
+    items = _compute_items(body.document_kind, body.workers)
+    if body.document_kind in RULE_KINDS and not items:
+        warnings.append("填入的日期沒有產生任何期限；請確認日期欄位，必要時人工確認")
+    _, task_ids, added = _save_document(con, acct, case, body.document_kind, body.workers, items,
+                                        pending.filename if pending else "手動輸入", pending.digest if pending else None)
+    if pending:
+        documents.take(body.extract_id, acct["id"])  # consumed only after a successful save
+    return {"task_ids": [str(x) for x in task_ids], "added": added, "warnings": warnings, "obligations": items,
+            "case_id": case["id"], "calendar_years": sorted(CAL_YEARS)}
 
 
 def _norm_worker(name: str) -> str:
@@ -338,6 +398,7 @@ def clear_todos(acct=EMPLOYER, con: sqlite3.Connection = DB):
         con.execute("DELETE FROM tasks WHERE case_id IN (SELECT id FROM cases WHERE owner_id=?)", (acct["id"],))
         con.execute("DELETE FROM documents WHERE case_id IN (SELECT id FROM cases WHERE owner_id=?)", (acct["id"],))
         db.audit(con, acct["id"], None, "case", None, "clear")
+    documents.forget_account(acct["id"])
     for f in files:
         (UPLOADS / "proofs" / f).unlink(missing_ok=True)
     return {"ok": True}
@@ -425,24 +486,24 @@ def judge_proof(task: dict, data: dict) -> dict:
 async def upload_proof(tid: str, file: UploadFile = File(...), by: str = Form("雇主"), acct=EMPLOYER,
                        con: sqlite3.Connection = DB):
     task = _find_todo(con, acct, tid)
-    raw = await file.read()
-    path, image, text_doc = ingest(raw, file.filename, UPLOADS / "proofs", prefix=f"{tid}_")
-    sys_prompt = PROOF_SYS + f"\n\n待辦事項：{task['title']}\n移工：{task['worker']}\n法定期限：" + \
+    up = await read_upload(file)
+    # the worker's name is NOT sent: judge_proof compares names locally after the model answers
+    sys_prompt = PROOF_SYS + f"\n\n待辦事項：{task['title']}\n法定期限：" + \
         (f"{task['start']} ～ {task['due']}" if task.get("start") else f"{task['due']} 前")
-    data, model = read_with_llm(sys_prompt, image, text_doc, "以下是上傳的辦理證明：")
+    data, model, _ = read_with_llm(sys_prompt, up, "以下是上傳的辦理證明：")
     result = judge_proof(task, data)
-    result.update({"file": path.name, "filename": file.filename, "uploaded_by": by,
+    result.update({"file": None, "filename": file.filename, "uploaded_by": by, "original_kept": False,
                    "uploaded_at": datetime.now().isoformat(timespec="minutes"), "model": model})
     with db.tx(con):
         old = [r["stored_file"] for r in con.execute("SELECT stored_file FROM proofs WHERE task_id=?", (int(tid),))]
         con.execute("DELETE FROM proofs WHERE task_id=?", (int(tid),))
         con.execute("INSERT INTO proofs(task_id, submitted_at, observed_date, verdict, detail_json, stored_file) "
                     "VALUES (?,?,?,?,?,?)", (int(tid), db.now(), result.get("completed_date"), result["verdict"],
-                                             json.dumps(result, ensure_ascii=False), path.name))
+                                             json.dumps(result, ensure_ascii=False), None))
         con.execute("UPDATE tasks SET status='proof_submitted' WHERE id=? AND status IN ('todo','delegated')", (int(tid),))
         db.audit(con, acct["id"], task["case_id"], "proof", tid, f"submit:{result['verdict']}")
-    for f in old:
-        if f and f != path.name:
+    for f in old:  # files kept by pre-S02 versions
+        if f:
             (UPLOADS / "proofs" / f).unlink(missing_ok=True)
     return result
 
@@ -464,12 +525,8 @@ def delete_proof(tid: str, acct=EMPLOYER, con: sqlite3.Connection = DB):
 
 @app.get("/api/todos/{tid}/proof/file")
 def proof_file(tid: str, acct=EMPLOYER, con: sqlite3.Connection = DB):
-    task = _find_todo(con, acct, tid)
-    proof = task.get("proof") or {}
-    f = UPLOADS / "proofs" / (proof.get("file") or "")
-    if not proof.get("file") or not f.exists():
-        raise HTTPException(404, "沒有證明檔案")
-    return FileResponse(f, filename=proof.get("filename") or f.name)
+    _find_todo(con, acct, tid)
+    raise HTTPException(404, "系統不保存證明原件，只保存判讀結果")
 
 
 # ---------------------------------------------------------------- legal Q&A
@@ -773,6 +830,11 @@ def health():
 
 if WEB.exists():
     app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
+
+
+@app.exception_handler(documents.Refused)
+async def refused(request: Request, exc: documents.Refused):
+    return JSONResponse({"detail": exc.detail, "code": exc.code}, status_code=exc.status_code)
 
 
 @app.exception_handler(Exception)

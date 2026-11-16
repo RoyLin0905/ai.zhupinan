@@ -90,6 +90,16 @@
               <p>上傳公文後，AI 會讀出移工姓名與重要日期。<br>每個日期都附上公文原文，請您核對後再產生待辦。</p>
             </div>
             <div id="extract-loading" class="loading-panel" hidden><span class="spinner"></span><p id="loading-text">AI 正在閱讀公文…</p></div>
+            <div id="extract-blocked" class="blocked-panel" role="alert" hidden>
+              <h3>這張圖片沒有送出</h3>
+              <p id="blocked-text"></p>
+              <ul>
+                <li>可以改傳<strong>文字檔</strong>或<strong>可選取文字的 PDF</strong>：系統會先在本機遮蔽姓名、證號、地址，再送給 AI。</li>
+                <li>也可以直接在下方手動輸入日期。</li>
+                <li>決賽展示請使用左側的<strong>合成範例</strong>。</li>
+              </ul>
+              <button type="button" class="button secondary" id="manual-entry">改為手動輸入日期</button>
+            </div>
             <form id="worker-form" hidden>
               <label class="doc-type-row">文件類型
                 <select id="doc-type">
@@ -103,6 +113,10 @@
                   <tbody id="worker-rows"></tbody>
                 </table>
               </div>
+              <details class="sent-preview" id="sent-preview" hidden>
+                <summary>實際送給 AI 的內容（已在本機遮蔽個資）</summary>
+                <pre id="sent-preview-text"></pre>
+              </details>
               <div class="form-actions"><span id="model-note">請以公文原件核對姓名及日期</span><button class="button primary" type="submit">確認無誤，產生待辦<svg><use href="#i-arrow"/></svg></button></div>
             </form>
           </article>
