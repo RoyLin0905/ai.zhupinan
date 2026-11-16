@@ -27,3 +27,14 @@ demo/mockup/codex_log*.txt
 demo/mockup/codex_answer.md
 訪談與驗證素材.md
 訪談素材/
+
+# --- finals dev environment ---
+.venv/
+.env
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+.pytest_cache/

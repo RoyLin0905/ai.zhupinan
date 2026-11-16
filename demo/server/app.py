@@ -32,6 +32,16 @@ from extract import EXTRACT_SYS  # noqa: E402
 from privacy import PROMPT_NOTE, mask, restore  # noqa: E402  (personal data masked before any LLM call)
 from rules import CAL_YEARS, compute  # noqa: E402
 
+SERVICE = "zhupinan-demo"
+SERVICE_VERSION = "2026.11-finals-s00"
+LAWS = HERE.parent.parent / "validation" / "laws"
+
+# DEMO_DATA=true is the single marker that this server runs on synthetic data only.
+# This build is not cleared for real documents or real worker data, so any other value refuses to start.
+DEMO_DATA = os.environ.get("DEMO_DATA", "true").strip().lower()
+if DEMO_DATA != "true":
+    raise RuntimeError("此版本僅供合成資料示範：DEMO_DATA 必須為 true（未經法規與資安審查，不得處理真實資料）")
+
 WEB = HERE.parent / "web"
 DATA = HERE / "data"
 DATA.mkdir(exist_ok=True)
@@ -578,9 +588,34 @@ async def line_webhook(request: Request):
 
 
 # ---------------------------------------------------------------- static
+def law_versions() -> dict[str, str]:
+    """Statute name -> amendment date, read from the header of each law text used by rules and retrieval."""
+    out = {}
+    for f in sorted(LAWS.glob("*.txt")):
+        head = f.read_text(encoding="utf-8").splitlines()[:2]
+        name = head[0].lstrip("# ").strip() if head else f.stem
+        amended = head[1].split("：", 1)[-1].strip() if len(head) > 1 else ""
+        out[name] = amended
+    return out
+
+
+_LAW_VERSIONS = law_versions()
+
+
 @app.get("/api/health")
 def health():
-    return {"ok": True, "calendar_years": sorted(CAL_YEARS), "articles": len(_ARTS)}
+    """Service status for the demo machine. Never returns keys, tokens or case data."""
+    token, secret = line_cfg()
+    return {
+        "ok": True,
+        "service": SERVICE,
+        "version": SERVICE_VERSION,
+        "demo_mode": DEMO_DATA == "true",
+        "rules": {"engine": "validation/scripts/rules.py", "law_versions": _LAW_VERSIONS},
+        "calendar_years": sorted(CAL_YEARS),
+        "articles": len(_ARTS),
+        "line_configured": bool(token and secret),
+    }
 
 
 if WEB.exists():

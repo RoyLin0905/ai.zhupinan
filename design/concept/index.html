@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#193330">
+  <link rel="icon" href="data:,">
+  <title>竹聘安｜案件手帖概念稿</title>
+  <style>
+    :root{--ink:#193330;--sub:#56625e;--paper:#f7f5ee;--line:#d4d9d1;--accent:#b54630;--soft:#e9eee7;--amber:#765218}
+    *{box-sizing:border-box}html{font-family:"Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif;background:#d9ded8;color:var(--ink)}body{margin:0}button{font:inherit;cursor:pointer}a{color:inherit}button:focus-visible,a:focus-visible{outline:3px solid #176f91;outline-offset:3px}[hidden]{display:none!important}
+    .stage{min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,480px) minmax(0,1fr)}.side{padding:64px 36px;align-self:center}.side h2{font-size:clamp(36px,4vw,66px);line-height:1.16;letter-spacing:-.045em;margin:0 0 24px;max-width:560px}.side p{max-width:420px;line-height:1.85;color:#40514c}.side small{display:block;letter-spacing:.2em;font-weight:800;margin-bottom:22px}.side.right{font-size:14px}.side.right dl{max-width:350px}.side.right dt{font-weight:800;border-top:1px solid #aebbb0;padding-top:14px}.side.right dd{margin:6px 0 22px;line-height:1.8;color:#40514c}
+    .app{background:var(--paper);min-height:100vh;box-shadow:0 0 0 1px #aebbb0,0 16px 70px #152e2524;position:relative;overflow:hidden}.top{min-height:66px;padding:14px 22px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.brand{font-size:21px;font-weight:900;letter-spacing:.06em}.top-note{font-size:12px;color:var(--sub);text-align:right;line-height:1.5}.top-note b{display:block;color:var(--ink)}.screen{padding:0 22px 100px;min-height:calc(100vh - 66px)}.eyebrow{font-size:12px;letter-spacing:.16em;font-weight:800;color:var(--accent);margin:26px 0 10px}.title{font-size:clamp(30px,7.5vw,42px);line-height:1.22;letter-spacing:-.035em;margin:0 0 12px;font-weight:900}.lede{font-size:16px;line-height:1.7;color:var(--sub);margin:0 0 22px}.rule{border:0;border-top:1px solid var(--line);margin:24px 0}.section-heading{font-size:14px;letter-spacing:.12em;font-weight:800;display:flex;align-items:center;justify-content:space-between;margin:0 0 10px}.section-heading span{color:var(--sub);letter-spacing:0;font-weight:500}.task{width:100%;border:0;border-top:1px solid var(--line);background:transparent;display:flex;gap:16px;align-items:center;text-align:left;padding:16px 0;color:var(--ink)}.task:last-of-type{border-bottom:1px solid var(--line)}.task:hover{background:#edf0e8}.date{width:66px;min-width:66px;border:1px solid var(--ink);display:grid;grid-template-rows:23px 51px 20px;text-align:center;background:#fff}.date .month{background:var(--accent);color:#fff;font-size:12px;font-weight:800;line-height:23px}.date .day{font:800 43px/51px Georgia,serif;letter-spacing:-.1em;padding-right:5px}.date .weekday{font-size:11px;line-height:20px}.task-main{flex:1;min-width:0}.task-main strong{display:block;font-size:18px;line-height:1.4}.task-main small{font-size:13px;line-height:1.7;color:var(--sub);display:block;margin-top:5px}.task-main em{font-style:normal;color:var(--accent);font-weight:800}.chev{font-size:26px;color:#60756d}.quiet{font-size:14px;line-height:1.7;color:var(--sub);margin-top:8px}.strip{border-top:3px solid var(--ink);border-bottom:1px solid var(--ink);margin:28px 0 0;padding:18px 0}.strip strong{font-size:17px}.strip p{font-size:14px;line-height:1.7;color:var(--sub);margin:5px 0 12px}.text-link{border:0;background:none;padding:4px 0;color:var(--ink);text-decoration:underline;text-underline-offset:4px;font-weight:800}.nav{position:absolute;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(3,1fr);height:76px;padding-bottom:env(safe-area-inset-bottom);background:#f7f5eef2;backdrop-filter:blur(10px);border-top:1px solid var(--line)}.nav button{background:none;border:0;color:#58645e;font-size:13px;font-weight:700}.nav button[aria-current=page]{color:var(--accent);box-shadow:inset 0 3px var(--accent)}.nav .ico{display:block;font-size:24px;line-height:28px;font-weight:400}.back{border:0;background:none;padding:18px 0 4px;font-size:15px;font-weight:800;color:var(--ink)}.hero-date{display:flex;align-items:flex-end;gap:18px;margin-top:18px}.hero-date .date{width:116px;min-width:116px;grid-template-rows:30px 88px 27px}.hero-date .month{font-size:14px;line-height:30px}.hero-date .day{font-size:76px;line-height:88px}.hero-date .weekday{font-size:13px;line-height:27px}.count{padding-bottom:10px}.count b{font:800 42px/1 Georgia,serif}.count small{display:block;color:var(--sub);margin-top:6px}.detail-title{font-size:29px;line-height:1.28;margin:22px 0 8px}.def{margin:20px 0 0}.def div{border-top:1px solid var(--line);padding:14px 0}.def dt{font-size:13px;color:var(--sub);letter-spacing:.08em;font-weight:800}.def dd{margin:5px 0 0;font-size:16px;line-height:1.7}.basis{background:var(--soft);padding:16px;margin-top:12px}.basis strong{font-size:13px}.basis ol{margin:8px 0 0;padding-left:20px;font-size:14px;line-height:1.8}.action{display:block;width:100%;border:0;background:var(--ink);color:#fff;padding:17px 14px;min-height:56px;text-align:center;font-weight:800;font-size:17px;margin-top:18px}.action.secondary{background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px}.caption{font-size:12px;color:var(--sub);line-height:1.6}.step{display:flex;gap:8px;margin:20px 0}.step i{height:5px;flex:1;background:#d7ddd5}.step i.on{background:var(--accent)}.paper{border:1px solid #cbd1c9;background:#fff;padding:16px;margin-top:22px;box-shadow:5px 5px 0 #e4e8df}.paper .source{font-size:12px;color:var(--sub);letter-spacing:.08em;font-weight:800}.paper blockquote{margin:12px 0 0;padding:7px 10px;border-left:4px solid var(--accent);font-size:16px;line-height:1.8}.field{margin:26px 0}.field label{display:block;font-size:16px;font-weight:800;margin-bottom:8px}.field input{width:100%;height:52px;border:1px solid #8b9b90;border-radius:0;background:#fff;padding:0 12px;font:inherit;font-size:17px}.field small{display:block;font-size:13px;color:var(--sub);line-height:1.6;margin-top:7px}.alert{border-left:4px solid var(--accent);background:#f2e7df;padding:13px 15px;font-size:14px;line-height:1.7;margin-top:18px}.question{display:block;width:100%;padding:16px 12px;text-align:left;background:#fff;border:1px solid #9aa99d;margin:10px 0;font-size:17px;min-height:58px}.question[aria-pressed=true]{border:2px solid var(--ink);background:var(--soft);font-weight:800}.tiny{font-size:12px;line-height:1.7;color:var(--sub)}
+    .nav{position:fixed;left:50%;right:auto;bottom:0;width:min(100%,480px);transform:translateX(-50%);z-index:5}.app.focus .nav{display:none}
+    @media(max-width:1050px){.stage{display:block}.side{display:none}.app{max-width:560px;margin:auto;box-shadow:none}.nav{width:min(100%,560px)}}@media(max-width:560px){html{background:var(--paper)}.app{min-height:100dvh}.screen{min-height:calc(100dvh - 66px)}}@media(prefers-reduced-motion:no-preference){.screen:not([hidden]){animation:appear .22s ease-out}@keyframes appear{from{opacity:.6;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}}
+  </style>
+</head>
+<body>
+<div class="stage">
+  <aside class="side"><small>竹聘安 / 介面方向提案</small><h2>一份文件，<br>一條清楚的辦理路徑。</h2><p>讓雇主先看到下一步，再看計算依據。以案件紀錄和日期作為畫面骨架，縮短從 LINE 提醒到完成待辦的路徑。</p></aside>
+  <div class="app" id="app">
+    <header class="top"><div class="brand">竹聘安<span style="color:var(--accent)">・</span></div><div class="top-note"><b>陳家的聘僱手帖</b>互動概念稿 · 合成資料</div></header>
+    <main>
+      <section class="screen" id="home" aria-label="本週待辦">
+        <div class="eyebrow">11 月 14 日，星期六</div><h1 class="title">這週，先辦好<br>這一件事。</h1><p class="lede">阿妮的住宿地點已變更。請確認通報是否完成，期限還有 5 天。</p>
+        <div class="section-heading">下一步 <span>按期限排序</span></div>
+        <button class="task" data-open="detail"><span class="date"><span class="month">11 月</span><span class="day">19</span><span class="weekday">星期四</span></span><span class="task-main"><strong>通報住宿地點變更</strong><small><em>還有 5 天</em> · 尚未確認完成<br>阿妮 · 由你辦理</small></span><span class="chev" aria-hidden="true">›</span></button>
+        <button class="task" data-open="detail"><span class="date"><span class="month" style="background:var(--ink)">1 月</span><span class="day">19</span><span class="weekday">116 年</span></span><span class="task-main"><strong>下次健康檢查</strong><small>待核對檢查期間 · 阿妮</small></span><span class="chev" aria-hidden="true">›</span></button>
+        <div class="strip"><strong>這些日期從哪裡來？</strong><p>先看文件中的事實，再看法規的計算。每個日期都保留可查的來源。</p><button class="text-link" data-open="confirm">查看文件確認方式</button></div>
+        <p class="tiny">示範畫面。實際期限須依個案文件、適用法規及人工確認結果計算。</p>
+      </section>
+      <section class="screen" id="detail" aria-label="待辦詳情" hidden>
+        <button class="back" data-open="home">← 回本週</button><div class="hero-date"><span class="date"><span class="month">115 年 11 月</span><span class="day">19</span><span class="weekday">星期四</span></span><div class="count"><b>5 天</b><small>後到期</small></div></div>
+        <h1 class="detail-title">通報住宿地點變更</h1><p class="lede">阿妮 · 家庭看護 · 尚未確認完成</p>
+        <dl class="def"><div><dt>要做什麼</dt><dd>向工作所在地及住宿地點的地方主管機關確認通報方式，送出所需資料，保存受理證明。</dd></div><div><dt>由誰辦理</dt><dd>目前由你辦理；若委任他人，請核對交付的證明。</dd></div><div><dt>日期依據</dt><dd>示範：住宿地點於 11 月 12 日變更，依「變更後 7 日內」計算至 11 月 19 日。</dd></div></dl>
+        <div class="basis"><strong>查看計算紀錄</strong><ol><li>事件日期：115 年 11 月 12 日，待雇主確認</li><li>適用規則：住宿地點變更後 7 日內</li><li>示範結果：115 年 11 月 19 日</li></ol><p class="caption">依《雇主聘僱外國人許可及管理辦法》第 33 條。法規版本與適用條件應在正式系統中完整顯示。</p></div>
+        <button class="action" data-open="confirm">核對原始文件</button><button class="action secondary" id="done">我已通報，記錄證明</button><p class="tiny" id="done-note">此概念稿不會儲存文件或改動正式案件。</p>
+      </section>
+      <section class="screen" id="confirm" aria-label="確認文件資訊" hidden>
+        <button class="back" data-open="home">← 回本週</button><div class="eyebrow">文件確認 · 示範</div><h1 class="title">先確認事實，<br>再建立期限。</h1><p class="lede">AI 擷取的是文件文字；日期與事件類型請由你核對。</p>
+        <div class="step" aria-label="第 2 步，共 3 步"><i class="on"></i><i class="on"></i><i></i></div>
+        <div class="paper"><div class="source">原始文件 · 住宿地點變更通報單</div><blockquote>住宿地點變更日期：<mark>115 年 11 月 12 日</mark></blockquote></div>
+        <div class="field"><label for="event-date">實際變更日期</label><input id="event-date" type="date" value="2026-11-12"><small>請依原件核對。這個欄位會影響期限。</small></div>
+        <div class="alert"><strong>尚未完成確認</strong><br>如果文件模糊、日期互相矛盾，請停在這一步並向主管機關確認。</div>
+        <button class="action" id="confirm-button">我已核對，查看待辦</button><p class="tiny">此概念稿只演示操作方式，不重新計算法律期限。</p>
+      </section>
+      <section class="screen" id="help" aria-label="聯絡不上應變" hidden>
+        <div class="eyebrow">聯絡不上 · 第 1 步</div><h1 class="title">先確認情況，<br>再決定下一步。</h1><p class="lede">「聯絡不上」不等於已符合失聯通報要件。先記錄你確定的事實。</p>
+        <div class="step" aria-label="第 1 步，共 4 步"><i class="on"></i><i></i><i></i><i></i></div>
+        <div class="section-heading">今天是否是原本應工作的一天？</div>
+        <button class="question" aria-pressed="false">是，原本應工作</button><button class="question" aria-pressed="false">不是／我不確定</button>
+        <div class="alert"><strong>現在就能尋求協助</strong><br>不用等三天才詢問。可致電 1955，並保存聯繫紀錄。是否符合「連續曠職三日失去聯繫」須依實際工作日、聯繫與住宿資訊判斷。</div>
+        <a class="action" href="tel:1955" style="text-decoration:none">撥打 1955</a><p class="tiny">本頁不會自動認定移工失聯，也不會替你送出通報。</p>
+      </section>
+    </main>
+    <nav class="nav" aria-label="主要功能"><button data-open="home" aria-current="page"><span class="ico" aria-hidden="true">◫</span>本週</button><button data-open="confirm"><span class="ico" aria-hidden="true">▤</span>看文件</button><button data-open="help"><span class="ico" aria-hidden="true">◎</span>聯絡不上</button></nav>
+  </div>
+  <aside class="side right"><small>畫面取捨</small><dl><dt>一眼看下一步</dt><dd>首頁只有最近事項與時間，不用統計卡開場。</dd><dt>顯示可查的根據</dt><dd>每個期限都能展開事件日期、規則與原始文件。</dd><dt>敏感情境先釐清</dt><dd>聯絡不上先記錄事實與求助，系統不自行認定失聯。</dd></dl></aside>
+</div>
+<script>
+  const screens=[...document.querySelectorAll('.screen')];
+  function show(id){screens.forEach(s=>s.hidden=s.id!==id);document.getElementById('app').classList.toggle('focus',id==='detail'||id==='confirm');document.querySelectorAll('.nav button').forEach(b=>{if(b.dataset.open===id)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});window.scrollTo({top:0,behavior:'instant'});}
+  document.querySelectorAll('[data-open]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.open)));
+  document.querySelectorAll('.question').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.question').forEach(x=>x.setAttribute('aria-pressed','false'));b.setAttribute('aria-pressed','true')}));
+  document.getElementById('confirm-button').addEventListener('click',()=>show('detail'));
+  document.getElementById('done').addEventListener('click',()=>{document.getElementById('done-note').textContent='概念稿：正式系統應要求上傳或填寫受理證明，經核對後才標示完成。';});
+</script>
+</body>
+</html>
